@@ -258,7 +258,26 @@ async def lifespan(app: FastAPI):
 
     console_reset_task = asyncio.create_task(
         _console_reset_loop(), name="console-quota-reset"
-    )
+    ) if is_leader else None
+
+    # 7. Console 429 EXPIRED 账号自动恢复任务（每10分钟巡检一次）
+    # 恢复条件：状态 EXPIRED + 原因 console_429_threshold_exceeded
+    #          + usage_use_count > 5 + expired_at <= now - 1小时
+    _CONSOLE_RECOVERY_INTERVAL = 600  # 10 分钟
+
+    async def _console_recovery_loop() -> None:
+        while True:
+            await asyncio.sleep(_CONSOLE_RECOVERY_INTERVAL)
+            try:
+                await refresh_svc.recover_console_expired_accounts()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("console expired recovery loop error: error={}", exc)
+
+    console_recovery_task = asyncio.create_task(
+        _console_recovery_loop(), name="console-expired-recovery"
+    ) if is_leader else None
 
     logger.info("application startup completed")
     yield
@@ -267,11 +286,18 @@ async def lifespan(app: FastAPI):
     # Shutdown
     # -----------
     logger.info("application shutdown started")
-    console_reset_task.cancel()
-    try:
-        await console_reset_task
-    except asyncio.CancelledError:
-        pass
+    if console_reset_task is not None:
+        console_reset_task.cancel()
+        try:
+            await console_reset_task
+        except asyncio.CancelledError:
+            pass
+    if console_recovery_task is not None:
+        console_recovery_task.cancel()
+        try:
+            await console_recovery_task
+        except asyncio.CancelledError:
+            pass
     sync_task.cancel()
     try:
         await sync_task

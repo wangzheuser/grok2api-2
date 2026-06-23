@@ -43,8 +43,8 @@ def _w(remaining: int, total: int, window_seconds: int) -> QuotaWindow:
 BASIC_FAST_LIMIT = 30
 BASIC_FAST_WINDOW_SECONDS = 86_400
 
-BASIC_CONSOLE_LIMIT = 30
-BASIC_CONSOLE_WINDOW_SECONDS = 1800
+BASIC_CONSOLE_LIMIT = 20
+BASIC_CONSOLE_WINDOW_SECONDS = 3600
 
 BASIC_QUOTA_DEFAULTS = AccountQuotaSet(
     auto=_w(0, 0, 0),  # unsupported on basic accounts
@@ -146,6 +146,17 @@ def normalize_quota_window(
             remaining=max(0, min(int(window.remaining), BASIC_FAST_LIMIT)),
             total=BASIC_FAST_LIMIT,
             window_seconds=BASIC_FAST_WINDOW_SECONDS,
+            reset_at=window.reset_at,
+            synced_at=window.synced_at,
+            source=window.source,
+        )
+    if pool == "basic" and mode_id == 5:
+        # L1 修复：矫正历史 console 配额数据到当前常量值
+        # 历史值如 200/24h、70/5min、100/1min、30/15min、30/30min 等均归一到 20/60min
+        return QuotaWindow(
+            remaining=max(0, min(int(window.remaining), BASIC_CONSOLE_LIMIT)),
+            total=BASIC_CONSOLE_LIMIT,
+            window_seconds=BASIC_CONSOLE_WINDOW_SECONDS,
             reset_at=window.reset_at,
             synced_at=window.synced_at,
             source=window.source,

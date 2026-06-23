@@ -320,6 +320,11 @@ class AccountPage(BaseModel):
 
 class AccountChangeSet(BaseModel):
     revision: int = 0
+    # 本批返回行中观察到的最大 revision。
+    # 当 has_more=True 时，调用方应只推进到 batch_max_revision，
+    # 避免跳过尚未返回的中间行（参见 S2 修复）。
+    # 若本批为空则为 0。
+    batch_max_revision: int = 0
     items: list[AccountRecord] = Field(default_factory=list)
     deleted_tokens: list[str] = Field(default_factory=list)
     has_more: bool = False

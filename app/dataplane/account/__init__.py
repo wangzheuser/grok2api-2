@@ -263,7 +263,7 @@ class AccountDirectory:
             elif kind == FeedbackKind.RATE_LIMITED:
                 if strategy == "random":
                     pool_id = int(table.pool_by_idx[idx])
-                    cooling_sec = _pool_cooling_sec(pool_id)
+                    cooling_sec = _pool_cooling_sec(pool_id, mode_id)
                     fb.apply_rate_limited_random(table, idx, cooling_sec=cooling_sec)
                 else:
                     fb.apply_rate_limited_quota(table, idx, mode_id)
@@ -312,9 +312,19 @@ _POOL_INTERVAL_CONFIG: dict[str, tuple[str, int]] = {
     "heavy": ("account.refresh.heavy_interval_sec", 7_200),
 }
 
+# Console (mode_id=5) 窗口仅 3600s，使用 4 小时冷却（远大于窗口，
+# 给上游 team 限速充分恢复时间，但不会沉寂一整天）
+_CONSOLE_COOLING_SEC = 14_400
 
-def _pool_cooling_sec(pool_id: int) -> int:
-    """Cooling seconds for a 429 on a given pool (random strategy only)."""
+
+def _pool_cooling_sec(pool_id: int, mode_id: int = -1) -> int:
+    """Cooling seconds for a 429 on a given pool (random strategy only).
+
+    Console 模式 (mode_id=5) 使用独立冷却时长 4 小时；
+    其它模式按 pool 决定（basic=24h, super/heavy=2h）。
+    """
+    if mode_id == 5:
+        return _CONSOLE_COOLING_SEC
     pool_str = POOL_ID_TO_STR.get(pool_id, "basic")
     interval_key, default_interval = _POOL_INTERVAL_CONFIG.get(
         pool_str, _POOL_INTERVAL_CONFIG["basic"]

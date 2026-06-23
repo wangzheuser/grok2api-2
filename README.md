@@ -387,6 +387,29 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## 更新日志
 
+### v0.1.7
+
+**新功能**
+
+- 🔌 **Console 原生工具调用支持**（[PR#24](https://github.com/jiujiu532/grok2api/pull/24)，感谢 @daoguademeng）
+  - Console 模型支持 OpenAI 兼容的 `tools` / `tool_choice` 参数
+  - 客户端 function tools（如 bash、read）可稳定产出 `tool_calls`
+  - Grok 内置工具（web_search、x_search 等 19 个）保持内部语义，不泄露为客户端 tool_calls
+  - 支持多轮 tool-call 上下文（assistant tool_calls + tool result 正确转换）
+  - 新增 738 行回归测试覆盖核心逻辑
+
+**优化**
+
+- 🔧 **Console 配额参数调整**：恢复周期从 15 分钟改为 30 分钟，轮换阈值从 15 改为 20，降低单号负载
+- 💓 **SSE 心跳保活**：所有流式接口在数据开始前发送心跳注释，防止思考期间连接超时
+- ⚡ **TXT 导入异步化**：大批量导入不再阻塞，接口立即返回，刷新在后台进行
+- 🔒 **依赖安全升级**：cryptography 48.0.1+、starlette 1.1.0+、python-multipart 0.0.31+
+
+**修复**
+
+- 🐛 修复 NSFW 初始化时生日已锁定的 429 报错（[PR#25](https://github.com/jiujiu532/grok2api/pull/25)，感谢 @Xaihi-nun）
+- 🐛 修复批量刷新结果未区分异常与临时失败的问题
+
 ### v0.1.5 (2025-06-13)
 
 **优化**

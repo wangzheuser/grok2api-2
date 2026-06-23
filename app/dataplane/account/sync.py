@@ -147,10 +147,16 @@ async def apply_changes(
 
             changed = True
 
-        if changeset.revision > table.revision:
-            table.revision = changeset.revision
-
-        if not changeset.has_more:
+        if changeset.has_more:
+            # 中间批：只推进到本批观察到的最大 revision，
+            # 否则下一轮 scan 会跳过尚未返回的中间行（S2 修复）。
+            if changeset.batch_max_revision > table.revision:
+                table.revision = changeset.batch_max_revision
+        else:
+            # 最后一批：可以信任 changeset.revision（db 当前全局 rev），
+            # 把 table 推进到全局 rev，使下次 scan 不再重复扫描已处理行。
+            if changeset.revision > table.revision:
+                table.revision = changeset.revision
             break
 
     return changed

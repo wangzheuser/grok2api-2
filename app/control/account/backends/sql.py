@@ -26,7 +26,7 @@ from ..models import (
     AccountRecord,
     RuntimeSnapshot,
 )
-from ..quota_defaults import default_quota_set
+from ..quota_defaults import default_quota_set, BASIC_CONSOLE_LIMIT, BASIC_CONSOLE_WINDOW_SECONDS
 
 _TBL_ACCOUNTS = "accounts"
 _TBL_META     = "account_meta"
@@ -620,14 +620,18 @@ class SqlAccountRepository:
             )).fetchall()
             items: list[AccountRecord] = []
             deleted: list[str] = []
+            batch_max_rev = 0
             for row in rows:
                 r = _row_to_record(row)
+                if r.revision > batch_max_rev:
+                    batch_max_rev = r.revision
                 if r.is_deleted():
                     deleted.append(r.token)
                 else:
                     items.append(r)
             return AccountChangeSet(
                 revision=rev,
+                batch_max_revision=batch_max_rev,
                 items=items,
                 deleted_tokens=deleted,
                 has_more=len(rows) == limit,
@@ -687,8 +691,14 @@ class SqlAccountRepository:
             ts  = now_ms()
             count = 0
             for patch in patches:
+                # S3 修复：SELECT FOR UPDATE 锁行，避免多个并发 patch_accounts
+                # 在 read-modify-write 期间互相覆盖（JSON 列 / tags / ext 的 lost-update）。
+                # 数值列改用原子表达式 col=col+delta，无需依赖 Python 端计算。
+                # SQLite 在 SQL 后端不走这条路径（用 local.py 的 asyncio.Lock 串行化）。
                 row = (await conn.execute(
-                    sa.select(accounts_table).where(accounts_table.c.token == patch.token)
+                    sa.select(accounts_table)
+                    .where(accounts_table.c.token == patch.token)
+                    .with_for_update()
                 )).fetchone()
                 if row is None:
                     continue
@@ -723,12 +733,24 @@ class SqlAccountRepository:
                     updates["quota_grok_4_3"] = json.dumps(patch.quota_grok_4_3)
                 if patch.quota_console is not None:
                     updates["quota_console"] = json.dumps(patch.quota_console)
+                # S3 修复：数值列使用原子表达式 GREATEST(0, col+delta)，
+                # 而不是基于 SELECT 出的旧值在 Python 中算新值。
+                # GREATEST 在 MySQL/PostgreSQL 上均原生支持。
                 if patch.usage_use_delta is not None:
-                    updates["usage_use_count"] = max(0, record.usage_use_count + patch.usage_use_delta)
+                    delta = int(patch.usage_use_delta)
+                    updates["usage_use_count"] = sa.text(
+                        f"GREATEST(0, usage_use_count + {delta})"
+                    )
                 if patch.usage_fail_delta is not None:
-                    updates["usage_fail_count"] = max(0, record.usage_fail_count + patch.usage_fail_delta)
+                    delta = int(patch.usage_fail_delta)
+                    updates["usage_fail_count"] = sa.text(
+                        f"GREATEST(0, usage_fail_count + {delta})"
+                    )
                 if patch.usage_sync_delta is not None:
-                    updates["usage_sync_count"] = max(0, record.usage_sync_count + patch.usage_sync_delta)
+                    delta = int(patch.usage_sync_delta)
+                    updates["usage_sync_count"] = sa.text(
+                        f"GREATEST(0, usage_sync_count + {delta})"
+                    )
 
                 tags = list(record.tags)
                 if patch.tags is not None:
@@ -747,7 +769,7 @@ class SqlAccountRepository:
                 if patch.clear_failures:
                     for k in ("cooldown_until", "cooldown_reason", "disabled_at",
                               "disabled_reason", "expired_at", "expired_reason",
-                              "forbidden_strikes"):
+                              "forbidden_strikes", "console_429_count"):
                         ext.pop(k, None)
                     updates["status"]           = AccountStatus.ACTIVE.value
                     updates["usage_fail_count"] = 0
@@ -859,6 +881,190 @@ class SqlAccountRepository:
             deleted=deleted,
             revision=upserted_result.revision,
         )
+
+    async def reset_expired_console_windows(self) -> int:
+        """Batch-reset exhausted + expired console quotas via direct SQL.
+
+        处理两种异常情况：
+        1. 老条件：remaining<=0 且 (reset_at IS NULL 或已过期) → 正常配额耗尽恢复
+        2. 新条件 (M6)：reset_at 已过期（即使 remaining>0）→ 异常数据归位
+        """
+        import json as _json
+        now = now_ms()
+
+        if self._dialect == "postgresql":
+            count_sql = sa.text(
+                "SELECT COUNT(*) FROM accounts"
+                " WHERE status = 'active'"
+                " AND deleted_at IS NULL"
+                " AND ("
+                "   ("
+                "     (quota_console->>'remaining')::int <= 0"
+                "     AND ("
+                "       quota_console->>'reset_at' IS NULL"
+                "       OR (quota_console->>'reset_at')::bigint < :now"
+                "     )"
+                "   )"
+                "   OR ("
+                "     quota_console->>'reset_at' IS NOT NULL"
+                "     AND (quota_console->>'reset_at')::bigint < :now"
+                "   )"
+                " )"
+            )
+            update_sql = sa.text(
+                "UPDATE accounts"
+                " SET quota_console = :reset_json, revision = :rev, updated_at = :now"
+                " WHERE status = 'active'"
+                " AND deleted_at IS NULL"
+                " AND ("
+                "   ("
+                "     (quota_console->>'remaining')::int <= 0"
+                "     AND ("
+                "       quota_console->>'reset_at' IS NULL"
+                "       OR (quota_console->>'reset_at')::bigint < :now"
+                "     )"
+                "   )"
+                "   OR ("
+                "     quota_console->>'reset_at' IS NOT NULL"
+                "     AND (quota_console->>'reset_at')::bigint < :now"
+                "   )"
+                " )"
+            )
+        else:
+            # MySQL
+            count_sql = sa.text(
+                "SELECT COUNT(*) FROM accounts"
+                " WHERE status = 'active'"
+                " AND deleted_at IS NULL"
+                " AND ("
+                "   ("
+                "     CAST(JSON_EXTRACT(quota_console, '$.remaining') AS SIGNED) <= 0"
+                "     AND ("
+                "       JSON_EXTRACT(quota_console, '$.reset_at') IS NULL"
+                "       OR CAST(JSON_EXTRACT(quota_console, '$.reset_at') AS SIGNED) < :now"
+                "     )"
+                "   )"
+                "   OR ("
+                "     JSON_EXTRACT(quota_console, '$.reset_at') IS NOT NULL"
+                "     AND CAST(JSON_EXTRACT(quota_console, '$.reset_at') AS SIGNED) < :now"
+                "   )"
+                " )"
+            )
+            update_sql = sa.text(
+                "UPDATE accounts"
+                " SET quota_console = :reset_json, revision = :rev, updated_at = :now"
+                " WHERE status = 'active'"
+                " AND deleted_at IS NULL"
+                " AND ("
+                "   ("
+                "     CAST(JSON_EXTRACT(quota_console, '$.remaining') AS SIGNED) <= 0"
+                "     AND ("
+                "       JSON_EXTRACT(quota_console, '$.reset_at') IS NULL"
+                "       OR CAST(JSON_EXTRACT(quota_console, '$.reset_at') AS SIGNED) < :now"
+                "     )"
+                "   )"
+                "   OR ("
+                "     JSON_EXTRACT(quota_console, '$.reset_at') IS NOT NULL"
+                "     AND CAST(JSON_EXTRACT(quota_console, '$.reset_at') AS SIGNED) < :now"
+                "   )"
+                " )"
+            )
+
+        async with self._session() as session:
+            async with session.begin():
+                result = await session.execute(count_sql, {"now": now})
+                count = result.scalar() or 0
+                if count == 0:
+                    return 0
+
+                reset_json = _json.dumps({
+                    "remaining": BASIC_CONSOLE_LIMIT,
+                    "total": BASIC_CONSOLE_LIMIT,
+                    "window_seconds": BASIC_CONSOLE_WINDOW_SECONDS,
+                    "reset_at": None,
+                    "synced_at": now,
+                    "source": 0,
+                })
+                rev = await self._bump_revision(session)
+                result = await session.execute(update_sql, {
+                    "reset_json": reset_json,
+                    "rev": rev,
+                    "now": now,
+                })
+                return result.rowcount or count
+
+    async def recover_console_expired_accounts(self) -> int:
+        """Auto-recover console 429 EXPIRED accounts with successful history.
+
+        Conditions:
+        - status = 'expired'
+        - state_reason = 'console_429_threshold_exceeded'
+        - usage_use_count > 5
+        - ext.expired_at <= now - 1 hour
+        """
+        import json as _json
+        now = now_ms()
+        recovery_threshold = now - 3600 * 1000
+
+        if self._dialect == "postgresql":
+            select_sql = sa.text(
+                "SELECT token, ext FROM accounts"
+                " WHERE status = 'expired'"
+                " AND deleted_at IS NULL"
+                " AND state_reason = 'console_429_threshold_exceeded'"
+                " AND usage_use_count > 5"
+                " AND (ext->>'expired_at')::bigint <= :threshold"
+            )
+        else:
+            # MySQL
+            select_sql = sa.text(
+                "SELECT token, ext FROM accounts"
+                " WHERE status = 'expired'"
+                " AND deleted_at IS NULL"
+                " AND state_reason = 'console_429_threshold_exceeded'"
+                " AND usage_use_count > 5"
+                " AND CAST(JSON_EXTRACT(ext, '$.expired_at') AS SIGNED) <= :threshold"
+            )
+
+        update_sql = sa.text(
+            "UPDATE accounts"
+            " SET status = 'active',"
+            "     state_reason = NULL,"
+            "     ext = :ext_json,"
+            "     revision = :rev,"
+            "     updated_at = :now"
+            " WHERE token = :token"
+        )
+
+        async with self._session() as session:
+            async with session.begin():
+                rows = (await session.execute(
+                    select_sql, {"threshold": recovery_threshold}
+                )).fetchall()
+
+                if not rows:
+                    return 0
+
+                rev = await self._bump_revision(session)
+                count = 0
+                for row in rows:
+                    token = row[0]
+                    ext_raw = row[1]
+                    try:
+                        ext = _json.loads(ext_raw) if ext_raw else {}
+                    except (ValueError, TypeError):
+                        ext = {}
+                    for k in ("expired_at", "expired_reason",
+                              "console_429_count", "console_429_last_at"):
+                        ext.pop(k, None)
+                    await session.execute(update_sql, {
+                        "ext_json": _json.dumps(ext),
+                        "rev": rev,
+                        "now": now,
+                        "token": token,
+                    })
+                    count += 1
+                return count
 
     async def close(self) -> None:
         """Dispose the SQLAlchemy connection pool."""

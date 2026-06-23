@@ -64,6 +64,8 @@ class RedisAccountRepository:
             "quota_fast":       json.dumps(qs.fast.to_dict()),
             "quota_expert":     json.dumps(qs.expert.to_dict()),
             "quota_heavy":      json.dumps(qs.heavy.to_dict()) if qs.heavy else "{}",
+            "quota_grok_4_3":   json.dumps(qs.grok_4_3.to_dict()) if qs.grok_4_3 else "{}",
+            "quota_console":    json.dumps(qs.console.to_dict()) if qs.console else "{}",
             "usage_use_count":  str(record.usage_use_count),
             "usage_fail_count": str(record.usage_fail_count),
             "usage_sync_count": str(record.usage_sync_count),
@@ -102,6 +104,12 @@ class RedisAccountRepository:
                 **({
                     "heavy": json.loads(_s("quota_heavy"))
                 } if _s("quota_heavy") and _s("quota_heavy") != "{}" else {}),
+                **({
+                    "grok_4_3": json.loads(_s("quota_grok_4_3"))
+                } if _s("quota_grok_4_3") and _s("quota_grok_4_3") != "{}" else {}),
+                **({
+                    "console": json.loads(_s("quota_console"))
+                } if _s("quota_console") and _s("quota_console") != "{}" else {}),
             },
             "usage_use_count":  int(_s("usage_use_count")  or 0),
             "usage_fail_count": int(_s("usage_fail_count") or 0),
@@ -160,21 +168,27 @@ class RedisAccountRepository:
         limit: int = 5000,
     ) -> AccountChangeSet:
         rev = await self.get_revision()
-        # Tokens whose revision > since_revision.
+        # Tokens whose revision > since_revision; 带分数以便提取本批最大 revision。
         entries = await self._r.zrangebyscore(
             _KEY_REV_LOG,
             since_revision + 1,
             "+inf",
-            withscores=False,
+            withscores=True,
             start=0,
             num=limit,
         )
-        tokens = [
-            (e.decode() if isinstance(e, bytes) else e) for e in entries
-        ]
+        tokens: list[tuple[str, int]] = []
+        batch_max_rev = 0
+        for entry in entries:
+            tok, score = entry
+            tok_s = tok.decode() if isinstance(tok, bytes) else tok
+            score_i = int(score)
+            if score_i > batch_max_rev:
+                batch_max_rev = score_i
+            tokens.append((tok_s, score_i))
         items: list[AccountRecord] = []
         deleted: list[str] = []
-        for token in tokens:
+        for token, _score in tokens:
             h = await self._r.hgetall(_record_key(token))
             if not h:
                 deleted.append(token)
@@ -186,6 +200,7 @@ class RedisAccountRepository:
                 items.append(record)
         return AccountChangeSet(
             revision=rev,
+            batch_max_revision=batch_max_rev,
             items=items,
             deleted_tokens=deleted,
             has_more=len(entries) == limit,
@@ -268,6 +283,10 @@ class RedisAccountRepository:
                 updates["quota_expert"] = json.dumps(patch.quota_expert)
             if patch.quota_heavy is not None:
                 updates["quota_heavy"] = json.dumps(patch.quota_heavy)
+            if patch.quota_grok_4_3 is not None:
+                updates["quota_grok_4_3"] = json.dumps(patch.quota_grok_4_3)
+            if patch.quota_console is not None:
+                updates["quota_console"] = json.dumps(patch.quota_console)
 
             # Usage counters.
             if patch.usage_use_delta is not None:
@@ -296,7 +315,7 @@ class RedisAccountRepository:
             if patch.clear_failures:
                 for k in ("cooldown_until", "cooldown_reason", "disabled_at",
                           "disabled_reason", "expired_at", "expired_reason",
-                          "forbidden_strikes"):
+                          "forbidden_strikes", "console_429_count"):
                     ext.pop(k, None)
                 updates["status"]           = AccountStatus.ACTIVE.value
                 updates["usage_fail_count"] = "0"
@@ -412,6 +431,160 @@ class RedisAccountRepository:
             deleted=deleted_result.deleted,
             revision=upserted_result.revision,
         )
+
+    async def reset_expired_console_windows(self) -> int:
+        """Python 实现 console 窗口过期重置（Redis 无 SQL）。
+
+        与 SQL 后端 (local.py / sql.py) 语义一致：
+        1. 老条件：remaining<=0 且 (reset_at IS NULL 或已过期) → 配额耗尽恢复
+        2. 新条件 (M6)：reset_at 已过期（即使 remaining>0）→ 异常数据归位
+        仅处理 status='active' 且未删除的账号。
+        """
+        from ..quota_defaults import BASIC_CONSOLE_LIMIT, BASIC_CONSOLE_WINDOW_SECONDS
+
+        now = now_ms()
+        reset_payload = {
+            "remaining": BASIC_CONSOLE_LIMIT,
+            "total": BASIC_CONSOLE_LIMIT,
+            "window_seconds": BASIC_CONSOLE_WINDOW_SECONDS,
+            "reset_at": None,
+            "synced_at": now,
+            "source": 0,
+        }
+        reset_json = json.dumps(reset_payload)
+
+        # 扫描所有账号 hash key
+        keys: list[str] = []
+        async for k in self._r.scan_iter("accounts:record:*"):
+            keys.append(k.decode() if isinstance(k, bytes) else k)
+        if not keys:
+            return 0
+
+        # 找出符合重置条件的账号
+        to_reset: list[str] = []
+        for key in keys:
+            h = await self._r.hgetall(key)
+            if not h:
+                continue
+
+            def _bget(k: str) -> str:
+                v = h.get(k) or h.get(k.encode())
+                return v.decode() if isinstance(v, bytes) else (v or "")
+
+            status = _bget("status")
+            deleted = _bget("deleted_at")
+            if status != "active" or deleted:
+                continue
+            qc_raw = _bget("quota_console")
+            if not qc_raw or qc_raw == "{}":
+                continue
+            try:
+                qc = json.loads(qc_raw)
+            except (ValueError, TypeError):
+                continue
+            remaining = int(qc.get("remaining") or 0)
+            reset_at = qc.get("reset_at")
+            reset_at_int = int(reset_at) if reset_at is not None else None
+
+            cond_old = remaining <= 0 and (reset_at_int is None or reset_at_int < now)
+            cond_new = reset_at_int is not None and reset_at_int < now
+            if cond_old or cond_new:
+                token = key.split(":", 2)[-1]
+                to_reset.append(token)
+
+        if not to_reset:
+            return 0
+
+        # 批量写入 + 记录 revision
+        rev = await self._bump_revision()
+        for token in to_reset:
+            await self._r.hset(_record_key(token), mapping={
+                "quota_console": reset_json,
+                "revision": str(rev),
+                "updated_at": str(now),
+            })
+            await self._r.zadd(_KEY_REV_LOG, {token: rev})
+        return len(to_reset)
+
+    async def recover_console_expired_accounts(self) -> int:
+        """Auto-recover console 429 EXPIRED accounts with successful history.
+
+        Conditions:
+        - status = 'expired'
+        - state_reason = 'console_429_threshold_exceeded'
+        - usage_use_count > 5
+        - ext.expired_at <= now - 1 hour
+        """
+        now = now_ms()
+        recovery_threshold = now - 3600 * 1000
+
+        # 扫描所有账号
+        keys: list[str] = []
+        async for k in self._r.scan_iter("accounts:record:*"):
+            keys.append(k.decode() if isinstance(k, bytes) else k)
+        if not keys:
+            return 0
+
+        to_recover: list[tuple[str, dict]] = []
+        for key in keys:
+            h = await self._r.hgetall(key)
+            if not h:
+                continue
+
+            def _bget(k: str) -> str:
+                v = h.get(k) or h.get(k.encode())
+                return v.decode() if isinstance(v, bytes) else (v or "")
+
+            status = _bget("status")
+            deleted = _bget("deleted_at")
+            state_reason = _bget("state_reason")
+            if (
+                status != "expired"
+                or deleted
+                or state_reason != "console_429_threshold_exceeded"
+            ):
+                continue
+            try:
+                use_count = int(_bget("usage_use_count") or 0)
+            except (ValueError, TypeError):
+                continue
+            if use_count <= 5:
+                continue
+            ext_raw = _bget("ext")
+            try:
+                ext = json.loads(ext_raw) if ext_raw else {}
+            except (ValueError, TypeError):
+                ext = {}
+            expired_at = ext.get("expired_at")
+            if expired_at is None:
+                continue
+            try:
+                expired_at_int = int(expired_at)
+            except (ValueError, TypeError):
+                continue
+            if expired_at_int > recovery_threshold:
+                continue
+            # 清理 EXPIRED 相关字段
+            for k in ("expired_at", "expired_reason",
+                      "console_429_count", "console_429_last_at"):
+                ext.pop(k, None)
+            token = key.split(":", 2)[-1]
+            to_recover.append((token, ext))
+
+        if not to_recover:
+            return 0
+
+        rev = await self._bump_revision()
+        for token, ext in to_recover:
+            await self._r.hset(_record_key(token), mapping={
+                "status": "active",
+                "state_reason": "",
+                "ext": json.dumps(ext),
+                "revision": str(rev),
+                "updated_at": str(now),
+            })
+            await self._r.zadd(_KEY_REV_LOG, {token: rev})
+        return len(to_recover)
 
     async def close(self) -> None:
         """Close the underlying Redis connection pool."""
