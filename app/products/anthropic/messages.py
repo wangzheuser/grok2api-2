@@ -286,7 +286,6 @@ async def create(
 
     cfg     = get_config()
     spec    = resolve_model(model)
-    mode_id = int(spec.mode_id)
 
     # Build internal message list
     internal_messages = _parse_anthropic_messages(messages, system)

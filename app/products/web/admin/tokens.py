@@ -17,7 +17,6 @@ from fastapi.responses import Response
 from pydantic import BaseModel, RootModel
 
 from app.platform.errors import AppError, ErrorKind, ValidationError
-from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
 from app.control.account.commands import (
