@@ -30,6 +30,7 @@ class FeedbackKind(StrEnum):
     UNAUTHORIZED = "unauthorized"   # 401 — token invalid / expired
     FORBIDDEN    = "forbidden"      # 403 — account suspended / CF challenge
     RATE_LIMITED = "rate_limited"   # 429 — quota exhausted
+    MODEL_TRANSIENT_RATE_LIMIT = "model_transient_rate_limit"  # 模型级瞬态 429
     SERVER_ERROR = "server_error"   # 5xx — upstream fault
     DISABLE      = "disable"        # operator-initiated disable
     DELETE       = "delete"         # operator-initiated delete

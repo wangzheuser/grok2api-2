@@ -366,6 +366,10 @@ def create_app() -> FastAPI:
             "description": "Admin local cache management endpoints.",
         },
         {
+            "name": "Admin - Models",
+            "description": "Admin model catalog and fallback configuration helpers.",
+        },
+        {
             "name": "WebUI - System",
             "description": "WebUI authentication and system endpoints.",
         },

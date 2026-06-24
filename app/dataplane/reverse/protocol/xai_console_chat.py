@@ -28,6 +28,8 @@
 - response.completed                      — 含 usage 统计
 """
 
+import hashlib
+import re
 from typing import Any, AsyncGenerator
 
 import orjson
@@ -75,6 +77,9 @@ _MODEL_FIXED_EFFORT: dict[str, str] = {
     "grok-4.20-multi-agent-high":   "high",
     "grok-4.20-multi-agent-xhigh":  "xhigh",
 }
+
+# Public alias used by admin metadata and console runtime guard.
+MODEL_FIXED_EFFORT = _MODEL_FIXED_EFFORT
 
 # 特殊 max_output_tokens（默认 1_000_000）
 _MODEL_MAX_OUTPUT_TOKENS: dict[str, int] = {
@@ -188,10 +193,10 @@ def build_console_payload(
             input_items.extend(_assistant_tool_calls_to_console(tool_calls))
 
     # reasoning effort：模型名固定值优先，其次用户传入，最后默认 medium
-    effort = _MODEL_FIXED_EFFORT.get(model) or _EFFORT_MAP.get(reasoning_effort or "medium", "medium")
+    effort = console_payload_effort(model, reasoning_effort)
 
     # 获取 console 实际模型名
-    console_model = CONSOLE_MODELS.get(model, model)
+    console_model = console_model_for(model)
 
     payload: dict[str, Any] = {
         "model": console_model,
@@ -221,6 +226,19 @@ def build_console_payload(
         len(payload_tools),
     )
     return payload
+
+
+def console_model_for(model: str) -> str:
+    """Return the actual console.x.ai model for a public model id."""
+    return CONSOLE_MODELS.get(model, model)
+
+
+def console_payload_effort(model: str, reasoning_effort: str | None = None) -> str:
+    """Resolve the console reasoning effort for a public model id."""
+    return _MODEL_FIXED_EFFORT.get(model) or _EFFORT_MAP.get(
+        reasoning_effort or "medium",
+        "medium",
+    )
 
 
 def _default_console_tools(console_model: str) -> list[dict[str, Any]]:
@@ -754,6 +772,74 @@ def classify_console_line(line: str) -> tuple[str, str]:
     return "skip", ""
 
 
+_SENSITIVE_TEXT_RE = re.compile(
+    r"(?i)(bearer\s+)[a-z0-9._~+/=-]+"
+    r"|(sso(?:-rw)?=)[^;\s]+"
+    r"|(cf_clearance=)[^;\s]+"
+    r"|([a-z0-9_-]{32,})"
+)
+
+
+def _short_hash(value: str | None) -> str:
+    """Return a short stable hash for correlation without exposing secrets."""
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()[:12]
+
+
+def _sanitize_observation_text(text: str, *, limit: int = 240) -> str:
+    """Redact token-like substrings before writing upstream bodies to logs."""
+    if not text:
+        return ""
+
+    def _replace(match: re.Match[str]) -> str:
+        for group_index in (1, 2, 3):
+            prefix = match.group(group_index)
+            if prefix:
+                return f"{prefix}<redacted>"
+        return "<redacted>"
+
+    compact = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+    return _SENSITIVE_TEXT_RE.sub(_replace, compact)[:limit]
+
+
+def _classify_console_error_body(body: str) -> str:
+    """Classify console.x.ai error text into a coarse root-cause bucket."""
+    normalized = body.lower()
+    if not body:
+        return "empty_body"
+    if "insufficient_model_capacity" in normalized or "model capacity" in normalized:
+        return "upstream_capacity"
+    if "monthly_request_count" in normalized or "quota" in normalized:
+        return "account_quota"
+    if (
+        "suspicious activity" in normalized
+        or "account throttled" in normalized
+        or "account_throttled" in normalized
+    ):
+        return "account_throttle"
+    if "rate limit" in normalized or "too many requests" in normalized:
+        return "rate_limit"
+    if "cloudflare" in normalized or "cf_clearance" in normalized or "challenge" in normalized:
+        return "cloudflare_challenge"
+    return "unknown"
+
+
+def _console_non_200_code(status: int, body_class: str) -> str:
+    """Return the normalized application error code for a console failure."""
+    if status == 429 and body_class == "empty_body":
+        return "model_transient_rate_limit"
+    return "upstream_error"
+
+
+def _console_non_200_body_class(status: int, body: str) -> str:
+    """Return the external body class for a console failure."""
+    body_class = _classify_console_error_body(body)
+    if _console_non_200_code(status, body_class) == "model_transient_rate_limit":
+        return "model_transient_rate_limit"
+    return body_class
+
+
 async def stream_console_chat(
     token: str,
     payload: dict[str, Any],
@@ -794,11 +880,41 @@ async def stream_console_chat(
                 body = response.content.decode("utf-8", "replace")[:400]
             except Exception:
                 body = ""
-            await proxy.feedback(lease, _status_feedback(response.status_code))
+            retry_after = response.headers.get("retry-after", "")
+            proxy_hash = _short_hash(lease.proxy_url or "")
+            raw_body_class = _classify_console_error_body(body)
+            body_class = _console_non_200_body_class(response.status_code, body)
+            error_code = _console_non_200_code(response.status_code, raw_body_class)
+            logger.warning(
+                (
+                    "console upstream non-200 observed: status={} model={} effort={} "
+                    "token_hash={} proxy_hash={} has_proxy={} body_class={} "
+                    "body_len={} body_sha256={} retry_after={} body_preview={}"
+                ),
+                response.status_code,
+                payload.get("model", ""),
+                (payload.get("reasoning") or {}).get("effort", ""),
+                _short_hash(token),
+                proxy_hash,
+                bool(lease.proxy_url),
+                body_class,
+                len(body),
+                _short_hash(body),
+                retry_after,
+                _sanitize_observation_text(body),
+            )
+            await proxy.feedback(lease, _status_feedback(response.status_code, body_class))
             raise UpstreamError(
                 f"Console API returned {response.status_code}",
                 status=response.status_code,
                 body=body,
+                code=error_code,
+                details={
+                    "body_class": body_class,
+                    "raw_body_class": raw_body_class,
+                    "upstream_model": str(payload.get("model", "")),
+                    "effort": str((payload.get("reasoning") or {}).get("effort", "")),
+                },
             )
 
         await proxy.feedback(lease, _success_feedback())
@@ -832,9 +948,11 @@ def _transport_error_feedback():
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
     return ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
 
-def _status_feedback(status: int):
+def _status_feedback(status: int, body_class: str = ""):
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
-    if status == 403:
+    if status == 429 and body_class == "model_transient_rate_limit":
+        kind = ProxyFeedbackKind.SUCCESS
+    elif status == 403:
         kind = ProxyFeedbackKind.CHALLENGE
     elif status == 429:
         kind = ProxyFeedbackKind.RATE_LIMITED
@@ -847,8 +965,11 @@ def _status_feedback(status: int):
 
 __all__ = [
     "CONSOLE_MODELS",
+    "MODEL_FIXED_EFFORT",
     "build_console_payload",
     "client_function_tool_names",
+    "console_model_for",
+    "console_payload_effort",
     "ConsoleStreamAdapter",
     "classify_console_line",
     "stream_console_chat",

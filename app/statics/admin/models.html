@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Grok2API - 模型信息</title>
+  <link rel="stylesheet" href="/static/css/app.css?v={{APP_VERSION}}">
+  <style>
+    :root{--bg:#f7f7f8;--card:#fff;--fg:#111827;--muted:#6b7280;--line:#e5e7eb;--brand:#111827}
+    body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    .admin-main{max-width:1280px;margin:0 auto;padding:28px 20px 72px}
+    .page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px}
+    .page-title{font-size:28px;font-weight:800;letter-spacing:-.03em}
+    .page-sub{margin-top:6px;color:var(--muted);font-size:14px}
+    .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:14px 0 18px}
+    .search{min-width:260px;flex:1;border:1px solid var(--line);border-radius:12px;background:#fff;padding:10px 12px;font-size:14px}
+    .select,.chip{border:1px solid var(--line);border-radius:12px;background:#fff;padding:10px 12px;font-size:14px}
+    .chip{display:inline-flex;gap:8px;align-items:center;cursor:pointer;user-select:none}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:18px;box-shadow:0 10px 30px rgba(15,23,42,.05);overflow:hidden}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle;text-align:left}
+    th{background:#fafafa;color:#374151;font-size:12px;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+    tr:last-child td{border-bottom:0}
+    .model-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700}
+    .muted{color:var(--muted)}
+    .badge{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;font-size:12px;font-weight:700;background:#f3f4f6;color:#374151;white-space:nowrap}
+    .badge.ok{background:#dcfce7;color:#166534}.badge.warn{background:#fef3c7;color:#92400e}.badge.console{background:#dbeafe;color:#1d4ed8}
+    .copy-btn{border:1px solid var(--line);border-radius:9px;background:#fff;padding:6px 9px;font-size:12px;cursor:pointer}
+    .copy-btn:hover{background:#f9fafb}
+    .id-cell{display:flex;align-items:center;gap:8px;min-width:260px}
+    .empty{padding:36px;text-align:center;color:var(--muted)}
+    @media(max-width:900px){.card{overflow:auto}.page-head{display:block}.toolbar{align-items:stretch}.search{min-width:100%}}
+  </style>
+</head>
+<body>
+<div id="admin-header" data-active="/admin/models"></div>
+
+<main class="admin-main">
+  <div class="page-head">
+    <div>
+      <div class="page-title">模型信息</div>
+      <div class="page-sub">查看所有已注册模型，复制模型 ID，用于 API 调用和 Console fallback 配置。</div>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <input id="q" class="search" placeholder="搜索模型 ID、名称、上游模型…">
+    <select id="cap" class="select">
+      <option value="">全部能力</option>
+    </select>
+    <label class="chip"><input id="only-console" type="checkbox">只看 Console</label>
+    <label class="chip"><input id="only-fallback" type="checkbox">只看可作为 fallback target</label>
+  </div>
+
+  <section class="card">
+    <table>
+      <thead>
+      <tr>
+        <th>模型 ID</th>
+        <th>名称</th>
+        <th>能力</th>
+        <th>Tier / Mode</th>
+        <th>Console</th>
+        <th>上游模型 / Effort</th>
+        <th>启用</th>
+        <th>账号池可用</th>
+        <th>Fallback Target</th>
+      </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty" class="empty" hidden>没有匹配的模型</div>
+  </section>
+</main>
+
+<script src="/static/js/i18n.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/admin-header.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
+<script>
+const rowsEl = document.getElementById('rows');
+const emptyEl = document.getElementById('empty');
+const state = { models: [], q: '', cap: '', onlyConsole: false, onlyFallback: false };
+
+async function api(path) {
+  const key = await adminKey.get();
+  const res = await fetch('/admin/api' + path, { headers: { Authorization: `Bearer ${key}` } });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+function esc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+function badge(text, cls = '') {
+  return `<span class="badge ${cls}">${esc(text)}</span>`;
+}
+
+async function copyModel(id) {
+  await navigator.clipboard.writeText(id);
+  showToast?.(`已复制：${id}`, 'success');
+}
+
+function renderCapability(models) {
+  const cap = document.getElementById('cap');
+  const current = cap.value;
+  const caps = [...new Set(models.flatMap(m => m.capabilities || []))].sort();
+  cap.innerHTML = '<option value="">全部能力</option>' + caps.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  cap.value = current;
+}
+
+function filtered() {
+  const q = state.q.trim().toLowerCase();
+  return state.models.filter(m => {
+    if (state.cap && !(m.capabilities || []).includes(state.cap)) return false;
+    if (state.onlyConsole && !m.is_console) return false;
+    if (state.onlyFallback && !m.fallback_target) return false;
+    if (!q) return true;
+    const hay = [m.id, m.name, m.console_model, m.mode, m.tier, ...(m.capabilities || [])].join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+}
+
+function render() {
+  const items = filtered();
+  rowsEl.innerHTML = items.map(m => `
+    <tr>
+      <td>
+        <div class="id-cell">
+          <span class="model-id">${esc(m.id)}</span>
+          <button class="copy-btn" type="button" data-copy="${esc(m.id)}">复制</button>
+        </div>
+      </td>
+      <td>${esc(m.name || '')}</td>
+      <td>${(m.capabilities || []).map(c => badge(c)).join(' ')}</td>
+      <td><span class="muted">${esc(m.tier)}</span> / <span class="muted">${esc(m.mode)}</span></td>
+      <td>${m.is_console ? badge('Console', 'console') : '<span class="muted">-</span>'}</td>
+      <td>
+        <div>${m.console_model ? esc(m.console_model) : '<span class="muted">-</span>'}</div>
+        <div class="muted">${m.fixed_effort ? 'effort=' + esc(m.fixed_effort) : ''}</div>
+      </td>
+      <td>${m.enabled ? badge('启用', 'ok') : badge('禁用', 'warn')}</td>
+      <td>${m.available ? badge('可用', 'ok') : badge('当前不可用', 'warn')}</td>
+      <td>${m.fallback_target ? badge('是', 'ok') : '<span class="muted">否</span>'}</td>
+    </tr>
+  `).join('');
+  emptyEl.hidden = items.length > 0;
+  rowsEl.querySelectorAll('[data-copy]').forEach(btn => btn.addEventListener('click', () => copyModel(btn.dataset.copy)));
+}
+
+async function boot() {
+  await renderAdminHeader?.();
+  const key = await adminKey.get();
+  if (!key || !await verifyKey('/admin/api/verify', key).catch(() => false)) {
+    location.href = '/admin/login';
+    return;
+  }
+  const payload = await api('/models');
+  state.models = payload.data || [];
+  renderCapability(state.models);
+  render();
+}
+
+document.getElementById('q').addEventListener('input', e => { state.q = e.target.value; render(); });
+document.getElementById('cap').addEventListener('change', e => { state.cap = e.target.value; render(); });
+document.getElementById('only-console').addEventListener('change', e => { state.onlyConsole = e.target.checked; render(); });
+document.getElementById('only-fallback').addEventListener('change', e => { state.onlyFallback = e.target.checked; render(); });
+
+boot().catch(err => {
+  console.error(err);
+  showToast?.(`模型信息加载失败：${err.message}`, 'error');
+});
+</script>
+</body>
+</html>

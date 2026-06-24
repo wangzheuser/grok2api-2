@@ -269,6 +269,10 @@ class AccountDirectory:
                     fb.apply_rate_limited_quota(table, idx, mode_id)
                 fb.update_last_fail(table, idx, ts)
 
+            elif kind == FeedbackKind.MODEL_TRANSIENT_RATE_LIMIT:
+                # 模型级瞬态限流不是账号维度问题，不调整 quota/health/cooling。
+                pass
+
             elif kind == FeedbackKind.UNAUTHORIZED:
                 fb.apply_auth_failure(table, idx)
                 fb.update_last_fail(table, idx, ts)

@@ -112,6 +112,24 @@ max_retries = 1
 on_codes = "429,401,503"
 
 
+# ==================== Console 降级与熔断 ====================
+[console.fallback]
+# 是否启用 console 模型 fallback 规则
+enabled = false
+# 每行一条规则：source_pattern => target_model；source 支持 * 和 ?
+rules = ""
+
+[console.rate_limit]
+# 是否启用 console 模型级瞬态 429 熔断
+breaker_enabled = true
+# 连续多少次 model_transient_rate_limit 后打开熔断
+breaker_threshold = 2
+# 熔断打开时长（秒）
+breaker_ttl_sec = 180
+# 熔断打开且没有 fallback 时是否快速失败
+fast_fail_without_fallback = true
+
+
 [account.refresh]
 # 总开关：true=配额刷新模式（主动探测，选号评分）；false=自动重试模式（随机选号，零探测）
 enabled = true

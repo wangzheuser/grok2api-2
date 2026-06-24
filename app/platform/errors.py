@@ -71,10 +71,15 @@ class UpstreamError(AppError):
         *,
         status:  int = 502,
         body:    str = "",
+        code:    str = "upstream_error",
+        details: dict | None = None,
     ) -> None:
+        error_details = {"body": body}
+        if details:
+            error_details.update(details)
         super().__init__(
-            message, kind=ErrorKind.UPSTREAM, code="upstream_error", status=status,
-            details={"body": body},
+            message, kind=ErrorKind.UPSTREAM, code=code, status=status,
+            details=error_details,
         )
 
 

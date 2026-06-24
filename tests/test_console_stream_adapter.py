@@ -5,12 +5,25 @@ from unittest.mock import patch
 
 import orjson
 
+from app.platform.errors import UpstreamError
 from app.platform.tokens import estimate_tool_call_tokens
 from app.dataplane.reverse.protocol.xai_console_chat import (
     ConsoleStreamAdapter,
     build_console_payload,
     client_function_tool_names,
+    _console_non_200_body_class,
 )
+from app.dataplane.reverse.protocol.console_model_guard import (
+    configured_fallback_for,
+    is_model_transient_rate_limit,
+    parse_fallback_rules,
+    record_console_transient_failure,
+    reset_console_guard_state,
+    resolve_console_decision,
+    stream_console_chat_guarded,
+)
+from app.products.web.admin.models import _model_payload
+from app.control.model.registry import get as get_model_spec
 
 
 def _data(obj: dict) -> str:
@@ -23,6 +36,29 @@ class _FakeConfig:
 
     def get_float(self, key: str, default: float) -> float:
         return default
+
+    def get_bool(self, key: str, default: bool) -> bool:
+        return default
+
+    def get_int(self, key: str, default: int) -> int:
+        return default
+
+
+class _DictConfig:
+    def __init__(self, values: dict):
+        self.values = values
+
+    def get(self, key: str, default=None):
+        return self.values.get(key, default)
+
+    def get_bool(self, key: str, default: bool = False) -> bool:
+        value = self.values.get(key, default)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def get_int(self, key: str, default: int = 0) -> int:
+        return int(self.values.get(key, default))
 
 
 class _FakeDirectory:
@@ -66,6 +102,110 @@ def _chat_stream_payloads(frames: list[str]) -> list[dict]:
 
 
 class ConsoleStreamAdapterToolFilteringTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        reset_console_guard_state()
+
+    def test_empty_body_429_is_model_transient_rate_limit(self) -> None:
+        self.assertEqual(_console_non_200_body_class(429, ""), "model_transient_rate_limit")
+
+    def test_fallback_rules_support_wildcards_and_validate_targets(self) -> None:
+        cfg = _DictConfig({
+            "console.fallback.enabled": True,
+            "console.fallback.rules": "grok-4.3-* => grok-4.20-multi-agent-high\n",
+        })
+
+        rules = parse_fallback_rules(cfg.get("console.fallback.rules"))
+
+        self.assertEqual(rules[0].source_pattern, "grok-4.3-*")
+        self.assertEqual(
+            configured_fallback_for("grok-4.3-low", cfg),
+            "grok-4.20-multi-agent-high",
+        )
+
+    def test_model_circuit_uses_hot_config_threshold(self) -> None:
+        cfg = _DictConfig({
+            "console.rate_limit.breaker_enabled": True,
+            "console.rate_limit.breaker_threshold": 1,
+            "console.rate_limit.breaker_ttl_sec": 60,
+        })
+
+        opened = record_console_transient_failure("grok-4.3-low", cfg, reasoning_effort="low")
+        decision = resolve_console_decision(
+            requested_model="grok-4.3-low",
+            reasoning_effort="low",
+            cfg=cfg,
+        )
+
+        self.assertTrue(opened)
+        self.assertTrue(decision.circuit_open)
+
+    def test_guard_fallbacks_once_on_model_transient_rate_limit(self) -> None:
+        cfg = _DictConfig({
+            "console.fallback.enabled": True,
+            "console.fallback.rules": "grok-4.3-* => grok-4.20-multi-agent-high",
+            "console.rate_limit.breaker_enabled": True,
+            "console.rate_limit.breaker_threshold": 2,
+            "console.rate_limit.breaker_ttl_sec": 60,
+        })
+        seen_models: list[str] = []
+
+        async def fake_stream(_token, payload, **_kwargs):
+            seen_models.append(payload["model"])
+            if len(seen_models) == 1:
+                raise UpstreamError(
+                    "Console API returned 429",
+                    status=429,
+                    code="model_transient_rate_limit",
+                    details={"body_class": "model_transient_rate_limit"},
+                )
+            yield "response.output_text.delta", _data({"delta": "fallback ok"})
+
+        async def run() -> list[tuple[str, str]]:
+            return [
+                item async for item in stream_console_chat_guarded(
+                    token="token-test",
+                    requested_model="grok-4.3-low",
+                    reasoning_effort="low",
+                    cfg=cfg,
+                    timeout_s=1,
+                    build_payload=lambda model: build_console_payload(
+                        messages=[{"role": "user", "content": "hi"}],
+                        model=model,
+                        reasoning_effort="low",
+                    ),
+                    stream_func=fake_stream,
+                )
+            ]
+
+        events = asyncio.run(run())
+
+        self.assertEqual(seen_models, ["grok-4.3", "grok-4.20-multi-agent-0309"])
+        self.assertEqual(events[0][0], "response.output_text.delta")
+
+    def test_model_transient_error_helper(self) -> None:
+        exc = UpstreamError(
+            "Console API returned 429",
+            status=429,
+            code="model_transient_rate_limit",
+        )
+
+        self.assertTrue(is_model_transient_rate_limit(exc))
+
+    def test_admin_model_payload_contains_console_fallback_metadata(self) -> None:
+        spec = get_model_spec("grok-4.3-low")
+
+        payload = _model_payload(
+            spec,
+            pools=frozenset({"basic"}),
+            fallback_targets={"grok-4.3-low"},
+            created=123,
+        )
+
+        self.assertTrue(payload["is_console"])
+        self.assertEqual(payload["console_model"], "grok-4.3")
+        self.assertEqual(payload["fixed_effort"], "low")
+        self.assertTrue(payload["fallback_target"])
+
     def test_ignores_builtin_tool_events_when_client_function_tools_are_active(self) -> None:
         adapter = ConsoleStreamAdapter(function_tool_names={"lookup_order"})
 

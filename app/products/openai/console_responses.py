@@ -26,6 +26,10 @@ from app.dataplane.reverse.protocol.xai_console_chat import (
     ConsoleStreamAdapter,
     stream_console_chat,
 )
+from app.dataplane.reverse.protocol.console_model_guard import (
+    is_model_transient_rate_limit,
+    stream_console_chat_guarded,
+)
 from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai.chat import _configured_retry_codes, _should_retry_upstream
 from ._format import (
@@ -191,17 +195,6 @@ async def create(
                 text_buf: list[str] = []
 
                 try:
-                    payload = build_console_payload(
-                        messages=messages,
-                        model=model,
-                        temperature=temperature,
-                        top_p=top_p,
-                        reasoning_effort=effort,
-                        stream=True,
-                        tools=tools,
-                        tool_choice=tool_choice,
-                    )
-
                     try:
                         # response.created
                         yield format_sse("response.created", {
@@ -226,8 +219,23 @@ async def create(
 
                         event_count = 0
                         yield ": heartbeat\n\n"
-                        async for event_type, data in stream_console_chat(
-                            token, payload, timeout_s=timeout_s
+                        async for event_type, data in stream_console_chat_guarded(
+                            token=token,
+                            requested_model=model,
+                            reasoning_effort=effort,
+                            cfg=cfg,
+                            timeout_s=timeout_s,
+                            build_payload=lambda effective_model: build_console_payload(
+                                messages=messages,
+                                model=effective_model,
+                                temperature=temperature,
+                                top_p=top_p,
+                                reasoning_effort=effort,
+                                stream=True,
+                                tools=tools,
+                                tool_choice=tool_choice,
+                            ),
+                            stream_func=stream_console_chat,
                         ):
                             event_count += 1
                             tokens = adapter.feed(event_type, data)
@@ -369,7 +377,11 @@ async def create(
 
                     except UpstreamError as exc:
                         fail_exc = exc
-                        if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                        if (
+                            not is_model_transient_rate_limit(exc)
+                            and _should_retry_upstream(exc, retry_codes)
+                            and attempt < max_retries
+                        ):
                             _retry = True
                             logger.warning(
                                 "console responses retry: attempt={}/{} status={}",
@@ -417,20 +429,24 @@ async def create(
         adapter = ConsoleStreamAdapter(function_tool_names=function_tool_names)
 
         try:
-            payload = build_console_payload(
-                messages=messages,
-                model=model,
-                temperature=temperature,
-                top_p=top_p,
-                reasoning_effort=effort,
-                stream=True,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
-
             try:
-                async for event_type, data in stream_console_chat(
-                    token, payload, timeout_s=timeout_s
+                async for event_type, data in stream_console_chat_guarded(
+                    token=token,
+                    requested_model=model,
+                    reasoning_effort=effort,
+                    cfg=cfg,
+                    timeout_s=timeout_s,
+                    build_payload=lambda effective_model: build_console_payload(
+                        messages=messages,
+                        model=effective_model,
+                        temperature=temperature,
+                        top_p=top_p,
+                        reasoning_effort=effort,
+                        stream=True,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                    ),
+                    stream_func=stream_console_chat,
                 ):
                     adapter.feed(event_type, data)
 
@@ -485,7 +501,11 @@ async def create(
 
             except UpstreamError as exc:
                 fail_exc = exc
-                if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                if (
+                    not is_model_transient_rate_limit(exc)
+                    and _should_retry_upstream(exc, retry_codes)
+                    and attempt < max_retries
+                ):
                     logger.warning(
                         "console responses non-stream retry: attempt={}/{} status={}",
                         attempt + 1, max_retries, exc.status,

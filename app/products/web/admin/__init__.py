@@ -136,6 +136,25 @@ def _ensure_runtime_patch_allowed(payload: dict[str, Any]) -> None:
                 )
 
 
+def _validate_console_config(payload: dict[str, Any]) -> None:
+    console = payload.get("console")
+    if not isinstance(console, dict):
+        return
+    fallback = console.get("fallback")
+    if not isinstance(fallback, dict) or "rules" not in fallback:
+        return
+    from app.dataplane.reverse.protocol.console_model_guard import validate_fallback_rules
+
+    try:
+        validate_fallback_rules(fallback.get("rules"))
+    except ValueError as exc:
+        raise ValidationError(
+            str(exc),
+            param="console.fallback.rules",
+            code="invalid_fallback_rules",
+        ) from exc
+
+
 def _patch_touches_prefix(payload: dict[str, Any], prefix: str) -> bool:
     return any(
         path == prefix or path.startswith(f"{prefix}.")
@@ -165,11 +184,13 @@ from .tokens import router as _tokens_router  # noqa: E402
 from .batch import router as _batch_router  # noqa: E402
 from .assets import router as _assets_router  # noqa: E402
 from .cache import router as _cache_router  # noqa: E402
+from .models import router as _models_router  # noqa: E402
 
 router.include_router(_tokens_router)
 router.include_router(_batch_router)
 router.include_router(_assets_router)
 router.include_router(_cache_router)
+router.include_router(_models_router)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +217,7 @@ async def update_config(req: ConfigPatchRequest):
 
     patch = _sanitize_proxy_config(req.root)
     _ensure_runtime_patch_allowed(patch)
+    _validate_console_config(patch)
     cache_local_changed = _patch_touches_prefix(patch, "cache.local")
     await config.update(patch)
     # config.update() only writes to the backend and invalidates the in-memory

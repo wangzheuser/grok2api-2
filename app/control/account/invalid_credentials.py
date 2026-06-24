@@ -61,6 +61,8 @@ def feedback_kind_for_error(exc: BaseException | None) -> FeedbackKind:
     """Map an upstream exception to the appropriate account feedback kind."""
     if exc is None:
         return FeedbackKind.SERVER_ERROR
+    if getattr(exc, "code", "") == "model_transient_rate_limit":
+        return FeedbackKind.MODEL_TRANSIENT_RATE_LIMIT
     # Check for known blocked/invalid body markers first — these override
     # the generic status-code mapping so that e.g. a 403 with "blocked-user"
     # body is treated as an account-level credential failure, not a generic

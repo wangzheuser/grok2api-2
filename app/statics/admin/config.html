@@ -497,6 +497,30 @@ const SCHEMA_DEF = [
     ]
   },
   {
+    id: 'console', label: 'Console 保护', labelKey: 'config.schema.tabs.console',
+    groups: [
+      {
+        title: 'Console 降级与熔断', titleKey: 'config.schema.groups.consoleGuard',
+        section: 'console.fallback',
+        fields: [
+          { key: 'enabled', label: '启用 Console Fallback', labelKey: 'config.schema.fields.consoleFallbackEnabled.label', type: 'bool', desc: '开启后，console 模型遇到模型级瞬态 429 或熔断打开时，会按下方规则切换到备用模型。', descKey: 'config.schema.fields.consoleFallbackEnabled.desc' },
+          { key: 'rules', label: 'Fallback 规则', labelKey: 'config.schema.fields.consoleFallbackRules.label', type: 'textarea', desc: '每行一条：source_pattern => target_model。source 支持 * 和 ?，target 必须是精确 console 模型 ID。', descKey: 'config.schema.fields.consoleFallbackRules.desc', showIf: 'console.fallback.enabled' },
+          { key: 'model_catalog', label: '模型信息', type: 'link', href: '/admin/models', text: '打开模型信息页', desc: '查看并复制模型 ID，用于 API 调用和 fallback 规则配置。', showIf: 'console.fallback.enabled' },
+        ]
+      },
+      {
+        title: '模型级瞬态 429 熔断', titleKey: 'config.schema.groups.consoleRateLimit',
+        section: 'console.rate_limit',
+        fields: [
+          { key: 'breaker_enabled', label: '启用模型级熔断', type: 'bool', desc: '对 console 上游模型的 model_transient_rate_limit 按模型和 effort 维度熔断。' },
+          { key: 'breaker_threshold', label: '熔断阈值', type: 'number', min: 1, desc: '连续多少次模型级瞬态 429 后打开熔断。', showIf: 'console.rate_limit.breaker_enabled' },
+          { key: 'breaker_ttl_sec', label: '熔断时长（秒）', type: 'number', min: 1, desc: '熔断打开后的快速保护时长，到期后自动恢复尝试。', showIf: 'console.rate_limit.breaker_enabled' },
+          { key: 'fast_fail_without_fallback', label: '无 fallback 时快速失败', type: 'bool', desc: '熔断打开且未配置 fallback 时，直接返回 429，避免继续打上游。', showIf: 'console.rate_limit.breaker_enabled' },
+        ]
+      },
+    ]
+  },
+  {
     id: 'schedule', label: '任务调度', labelKey: 'config.schema.tabs.schedule',
     groups: [
       {
@@ -1006,6 +1030,16 @@ document.addEventListener('click', (event) => {
 
 function renderInput(field, section, value) {
   const fp = _fullPath(section, field.key);
+
+  if (field.type === 'link') {
+    return _el('a', {
+      class: 'page-action-btn',
+      href: field.href || '#',
+      target: '_blank',
+      rel: 'noopener noreferrer',
+      style: 'display:inline-flex;text-decoration:none',
+    }, field.text || field.label || field.href || '');
+  }
 
   const onChange = (v) => {
     const wasDirty = fp in _dirty;

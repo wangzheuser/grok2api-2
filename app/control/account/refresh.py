@@ -421,6 +421,8 @@ class AccountRefreshService:
 
         try:
             if exc is not None:
+                if getattr(exc, "code", "") == "model_transient_rate_limit":
+                    return
                 record = next(iter(await self._repo.get_accounts([token])), None)
                 if record is not None and await self._expire_invalid_credentials(
                     record, exc
