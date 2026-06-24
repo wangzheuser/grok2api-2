@@ -370,6 +370,10 @@ def create_app() -> FastAPI:
             "description": "Admin model catalog and fallback configuration helpers.",
         },
         {
+            "name": "Admin - Proxies",
+            "description": "Admin Console proxy pool management endpoints.",
+        },
+        {
             "name": "WebUI - System",
             "description": "WebUI authentication and system endpoints.",
         },

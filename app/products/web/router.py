@@ -58,6 +58,10 @@ async def admin_config():
 async def admin_models():
     return _serve_html("admin/models.html")
 
+@router.get("/admin/proxies", include_in_schema=False)
+async def admin_proxies():
+    return _serve_html("admin/proxies.html")
+
 @router.get("/admin/cache", include_in_schema=False)
 async def admin_cache():
     return _serve_html("admin/cache.html")

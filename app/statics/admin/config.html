@@ -518,6 +518,25 @@ const SCHEMA_DEF = [
           { key: 'fast_fail_without_fallback', label: '无 fallback 时快速失败', type: 'bool', desc: '熔断打开且未配置 fallback 时，直接返回 429，避免继续打上游。', showIf: 'console.rate_limit.breaker_enabled' },
         ]
       },
+      {
+        title: 'Console 专用代理池',
+        section: 'console.proxy_pool',
+        fields: [
+          { key: 'enabled', label: '启用 Console 代理池', type: 'bool', desc: '仅影响 console.x.ai 请求；关闭时继续使用全局网络代理配置。' },
+          { key: 'fallback_to_global_proxy', label: '无可用代理时回退全局代理', type: 'bool', desc: '启用后，Console 代理池无可调度代理时回退 proxy.egress。' },
+          { key: 'max_proxy_retries_per_request', label: '单请求代理重试次数', type: 'number', min: 0, desc: '代理硬失败时，同一账号最多重绑代理重试次数。' },
+          { key: 'challenge_failure_threshold', label: 'Challenge 失败阈值', type: 'number', min: 1, desc: '403 / challenge 软失败达到该次数后才切换代理。' },
+          { key: 'static_cooldown_sec', label: '静态代理冷却（秒）', type: 'number', min: 1, desc: '静态代理连接层失败后的冷却时长。' },
+          { key: 'dynamic_retry_base_sec', label: '动态模板初始退避（秒）', type: 'number', min: 1, desc: 'dynamic_template 代理失败后的初始退避。' },
+          { key: 'dynamic_retry_max_sec', label: '动态模板最大退避（秒）', type: 'number', min: 1, desc: 'dynamic_template 代理连续失败后的最大退避。' },
+          { key: 'dynamic_backoff_factor', label: '动态模板退避因子', type: 'number', min: 1, desc: 'dynamic_template 连续失败退避倍数。' },
+          { key: 'health_check_enabled', label: '启用健康检查开关', type: 'bool', desc: '后台代理池页测试按钮与后续定时检查共用的开关。' },
+          { key: 'health_check_url', label: '健康检查 URL', type: 'text', desc: '代理连通性测试访问的地址。' },
+          { key: 'health_check_interval_sec', label: '健康检查间隔（秒）', type: 'number', min: 1, desc: '预留给后续定时健康检查的间隔。' },
+          { key: 'health_check_timeout_sec', label: '健康检查超时（秒）', type: 'number', min: 1, desc: '后台手动测试代理的请求超时。' },
+          { key: 'proxy_pool_page', label: '代理池管理', type: 'link', href: '/admin/proxies', text: '打开代理池页面', desc: '新增、导入、启停、重置和测试 Console 专用代理。' },
+        ]
+      },
     ]
   },
   {

@@ -154,12 +154,13 @@ class ProxyDirectory:
         kind: RequestKind = RequestKind.HTTP,
         resource: bool = False,
         clearance_origin: str | None = None,
+        proxy_url_override: str | None = None,
     ) -> ProxyLease:
         """Return a ProxyLease for the next request.
 
         For DIRECT mode, returns a lease with no proxy or clearance.
         """
-        proxy_url = await self._pick_proxy_url(resource=resource)
+        proxy_url = proxy_url_override if proxy_url_override is not None else await self._pick_proxy_url(resource=resource)
         affinity = proxy_url or "direct"
         clearance_host = _clearance_host(clearance_origin)
 
@@ -202,6 +203,7 @@ class ProxyDirectory:
         # same broken node.
         if (
             self._egress_mode == EgressMode.PROXY_POOL
+            and lease.proxy_pool != "console"
             and lease.proxy_url
             and result.kind
             in (

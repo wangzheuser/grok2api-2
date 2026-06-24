@@ -24,12 +24,14 @@ class ProxyRuntime:
         kind:     RequestKind = RequestKind.HTTP,
         resource: bool        = False,
         clearance_origin: str | None = None,
+        proxy_url_override: str | None = None,
     ) -> ProxyLease:
         return await self._dir.acquire(
             scope=scope,
             kind=kind,
             resource=resource,
             clearance_origin=clearance_origin,
+            proxy_url_override=proxy_url_override,
         )
 
     async def feedback(self, lease: ProxyLease, result: ProxyFeedback) -> None:

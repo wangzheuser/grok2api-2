@@ -89,6 +89,12 @@ class ProxyLease(BaseModel):
     scope:       ProxyScope    = ProxyScope.APP
     kind:        RequestKind   = RequestKind.HTTP
     acquired_at: int           = 0   # ms
+    proxy_pool:  str           = ""  # console / global / empty
+    proxy_id:    str           = ""
+    proxy_mode:  str           = ""
+    generation:  int           = 0
+    runtime_epoch: int         = 0
+    account_key: str           = ""
 
     @property
     def has_proxy(self) -> bool:

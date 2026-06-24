@@ -35,7 +35,9 @@ from typing import Any, AsyncGenerator
 import orjson
 
 from app.platform.errors import UpstreamError
+from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
+from app.control.proxy.models import ProxyFeedbackKind
 from app.dataplane.reverse.protocol.tool_parser import ParsedToolCall
 
 
@@ -856,102 +858,152 @@ async def stream_console_chat(
     from app.dataplane.reverse.runtime.endpoint_table import CONSOLE_RESPONSES
 
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire()
-
-    headers = build_console_headers(token, lease=lease)
+    console_pool = await _get_console_proxy_pool_safe()
+    cfg = get_config()
+    max_proxy_retries = max(0, cfg.get_int("console.proxy_pool.max_proxy_retries_per_request", 1))
     payload_bytes = orjson.dumps(payload)
-    session_kwargs = build_session_kwargs(lease=lease)
 
-    async with ResettableSession(**session_kwargs) as session:
-        try:
-            response = await session.post(
-                CONSOLE_RESPONSES,
-                headers=headers,
-                data=payload_bytes,
-                timeout=timeout_s,
-                stream=True,
-            )
-        except Exception as exc:
-            await proxy.feedback(lease, _transport_error_feedback())
-            raise UpstreamError(f"Console transport failed: {exc}", status=502) from exc
+    for proxy_attempt in range(max_proxy_retries + 1):
+        lease = await console_pool.acquire(
+            token=token,
+            fallback_lease_factory=proxy.acquire,
+            clearance_origin="https://console.x.ai",
+        )
+        headers = build_console_headers(token, lease=lease)
+        session_kwargs = build_session_kwargs(lease=lease)
 
-        if response.status_code != 200:
+        async with ResettableSession(**session_kwargs) as session:
             try:
-                body = response.content.decode("utf-8", "replace")[:400]
-            except Exception:
-                body = ""
-            retry_after = response.headers.get("retry-after", "")
-            proxy_hash = _short_hash(lease.proxy_url or "")
-            raw_body_class = _classify_console_error_body(body)
-            body_class = _console_non_200_body_class(response.status_code, body)
-            error_code = _console_non_200_code(response.status_code, raw_body_class)
-            logger.warning(
-                (
-                    "console upstream non-200 observed: status={} model={} effort={} "
-                    "token_hash={} proxy_hash={} has_proxy={} body_class={} "
-                    "body_len={} body_sha256={} retry_after={} body_preview={}"
-                ),
-                response.status_code,
-                payload.get("model", ""),
-                (payload.get("reasoning") or {}).get("effort", ""),
-                _short_hash(token),
-                proxy_hash,
-                bool(lease.proxy_url),
-                body_class,
-                len(body),
-                _short_hash(body),
-                retry_after,
-                _sanitize_observation_text(body),
-            )
-            await proxy.feedback(lease, _status_feedback(response.status_code, body_class))
-            raise UpstreamError(
-                f"Console API returned {response.status_code}",
-                status=response.status_code,
-                body=body,
-                code=error_code,
-                details={
-                    "body_class": body_class,
-                    "raw_body_class": raw_body_class,
-                    "upstream_model": str(payload.get("model", "")),
-                    "effort": str((payload.get("reasoning") or {}).get("effort", "")),
-                },
-            )
+                response = await session.post(
+                    CONSOLE_RESPONSES,
+                    headers=headers,
+                    data=payload_bytes,
+                    timeout=timeout_s,
+                    stream=True,
+                )
+            except Exception as exc:
+                feedback = _transport_error_feedback(str(exc))
+                await _feedback_console_proxy(proxy, console_pool, lease, feedback)
+                if _should_retry_console_proxy(lease, feedback, proxy_attempt, max_proxy_retries):
+                    logger.warning(
+                        "console proxy retry on transport error: attempt={}/{} proxy_id={} error={}",
+                        proxy_attempt + 1,
+                        max_proxy_retries + 1,
+                        lease.proxy_id or "-",
+                        str(exc)[:160],
+                    )
+                    continue
+                raise UpstreamError(f"Console transport failed: {exc}", status=502) from exc
 
-        await proxy.feedback(lease, _success_feedback())
+            if response.status_code != 200:
+                try:
+                    body = response.content.decode("utf-8", "replace")[:400]
+                except Exception:
+                    body = ""
+                retry_after = response.headers.get("retry-after", "")
+                proxy_hash = _short_hash(lease.proxy_url or "")
+                raw_body_class = _classify_console_error_body(body)
+                body_class = _console_non_200_body_class(response.status_code, body)
+                error_code = _console_non_200_code(response.status_code, raw_body_class)
+                logger.warning(
+                    (
+                        "console upstream non-200 observed: status={} model={} effort={} "
+                        "token_hash={} proxy_hash={} has_proxy={} proxy_pool={} proxy_id={} body_class={} "
+                        "body_len={} body_sha256={} retry_after={} body_preview={}"
+                    ),
+                    response.status_code,
+                    payload.get("model", ""),
+                    (payload.get("reasoning") or {}).get("effort", ""),
+                    _short_hash(token),
+                    proxy_hash,
+                    bool(lease.proxy_url),
+                    lease.proxy_pool or "global",
+                    lease.proxy_id or "-",
+                    body_class,
+                    len(body),
+                    _short_hash(body),
+                    retry_after,
+                    _sanitize_observation_text(body),
+                )
+                feedback = _status_feedback(response.status_code, body_class)
+                await _feedback_console_proxy(proxy, console_pool, lease, feedback)
+                if _should_retry_console_proxy(lease, feedback, proxy_attempt, max_proxy_retries):
+                    logger.warning(
+                        "console proxy retry on status: attempt={}/{} proxy_id={} status={}",
+                        proxy_attempt + 1,
+                        max_proxy_retries + 1,
+                        lease.proxy_id or "-",
+                        response.status_code,
+                    )
+                    continue
+                raise UpstreamError(
+                    f"Console API returned {response.status_code}",
+                    status=response.status_code,
+                    body=body,
+                    code=error_code,
+                    details={
+                        "body_class": body_class,
+                        "raw_body_class": raw_body_class,
+                        "upstream_model": str(payload.get("model", "")),
+                        "effort": str((payload.get("reasoning") or {}).get("effort", "")),
+                    },
+                )
 
-        current_event = ""
-        try:
-            async for raw_line in response.aiter_lines():
-                # curl-cffi 的 aiter_lines 返回 bytes，先解码为 str
-                if isinstance(raw_line, bytes):
-                    try:
-                        raw_line = raw_line.decode("utf-8")
-                    except UnicodeDecodeError:
-                        raw_line = raw_line.decode("utf-8", errors="replace")
-                kind, value = classify_console_line(raw_line)
-                if kind == "event":
-                    current_event = value
-                elif kind == "data":
-                    yield current_event, value
-                    current_event = ""
-                elif kind == "done":
-                    return
-        except Exception as exc:
-            raise UpstreamError(f"Console stream read failed: {exc}", status=502) from exc
+            await _feedback_console_proxy(proxy, console_pool, lease, _success_feedback())
+
+            current_event = ""
+            try:
+                async for raw_line in response.aiter_lines():
+                    # curl-cffi 的 aiter_lines 返回 bytes，先解码为 str
+                    if isinstance(raw_line, bytes):
+                        try:
+                            raw_line = raw_line.decode("utf-8")
+                        except UnicodeDecodeError:
+                            raw_line = raw_line.decode("utf-8", errors="replace")
+                    kind, value = classify_console_line(raw_line)
+                    if kind == "event":
+                        current_event = value
+                    elif kind == "data":
+                        yield current_event, value
+                        current_event = ""
+                    elif kind == "done":
+                        return
+            except Exception as exc:
+                raise UpstreamError(f"Console stream read failed: {exc}", status=502) from exc
+
+
+async def _get_console_proxy_pool_safe():
+    from app.control.proxy.console_pool import get_console_proxy_pool
+    return await get_console_proxy_pool()
+
+
+async def _feedback_console_proxy(proxy, console_pool, lease, feedback) -> None:
+    """同时回写全局 clearance 状态和 Console 专用代理池状态。"""
+    await proxy.feedback(lease, feedback)
+    await console_pool.feedback(lease, feedback)
+
+
+def _should_retry_console_proxy(lease, feedback, attempt: int, max_attempts: int) -> bool:
+    """返回当前失败是否允许在同一账号下重绑代理重试。"""
+    if attempt >= max_attempts or lease.proxy_pool != "console":
+        return False
+    return feedback.kind == ProxyFeedbackKind.TRANSPORT_ERROR or feedback.status_code == 407
 
 
 def _success_feedback():
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
     return ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200)
 
-def _transport_error_feedback():
+def _transport_error_feedback(reason: str = ""):
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
-    return ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
+    return ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR, reason=reason)
 
 def _status_feedback(status: int, body_class: str = ""):
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
     if status == 429 and body_class == "model_transient_rate_limit":
         kind = ProxyFeedbackKind.SUCCESS
+    elif status == 407:
+        kind = ProxyFeedbackKind.UNAUTHORIZED
     elif status == 403:
         kind = ProxyFeedbackKind.CHALLENGE
     elif status == 429:
@@ -960,7 +1012,7 @@ def _status_feedback(status: int, body_class: str = ""):
         kind = ProxyFeedbackKind.UPSTREAM_5XX
     else:
         kind = ProxyFeedbackKind.FORBIDDEN
-    return ProxyFeedback(kind=kind, status_code=status)
+    return ProxyFeedback(kind=kind, status_code=status, reason=body_class)
 
 
 __all__ = [

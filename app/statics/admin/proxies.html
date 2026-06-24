@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Grok2API - Console 代理池</title>
+  <link rel="stylesheet" href="/static/css/app.css?v={{APP_VERSION}}">
+  <style>
+    body{background:#f7f4ee;color:#191713}
+    .admin-main{max-width:1360px;padding-top:82px}
+    .proxy-hero{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:18px;align-items:stretch;margin-bottom:18px}
+    .hero-card{position:relative;overflow:hidden;border:1px solid #e8ded0;border-radius:24px;background:linear-gradient(135deg,#fffaf1 0%,#f5efe4 46%,#ece5dc 100%);box-shadow:0 22px 60px rgba(58,45,24,.08);padding:24px}
+    .hero-card:after{content:"";position:absolute;width:260px;height:260px;right:-80px;top:-100px;border-radius:999px;background:radial-gradient(circle,rgba(96,76,42,.12),rgba(96,76,42,0) 70%)}
+    .eyebrow{font-size:12px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:#8f7552;margin-bottom:8px}
+    .title{font-size:32px;line-height:1.05;font-weight:900;letter-spacing:-.04em;margin:0 0 10px}
+    .sub{max-width:760px;color:#6f665a;font-size:14px}
+    .hero-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+    .btn-dark{background:#1f1b16;color:#fff;border-radius:999px;height:36px;padding:0 16px}
+    .btn-soft{background:#fff9ef;border:1px solid #e6dac8;color:#2b261f;border-radius:999px;height:36px;padding:0 16px}
+    .stats-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .stat{border:1px solid #e8ded0;border-radius:18px;background:rgba(255,255,255,.68);padding:14px}
+    .stat-value{font-size:26px;font-weight:900;letter-spacing:-.04em}.stat-label{font-size:12px;color:#7b7166;margin-top:2px}
+    .panel{border:1px solid #e8ded0;background:rgba(255,255,255,.82);box-shadow:0 14px 40px rgba(58,45,24,.06);border-radius:22px;overflow:hidden}
+    .toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px;border-bottom:1px solid #eadfce;flex-wrap:wrap}
+    .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.search,.select{height:36px;border:1px solid #e0d6c7;background:#fff;border-radius:12px;padding:0 12px;font-size:13px}.search{min-width:280px}.chip{display:inline-flex;align-items:center;gap:7px;height:36px;border:1px solid #e0d6c7;background:#fff;border-radius:999px;padding:0 12px;font-size:13px;color:#4b443c}
+    table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:13px 14px;border-bottom:1px solid #efe5d7;text-align:left;vertical-align:middle}th{font-size:11px;color:#7b7166;text-transform:uppercase;letter-spacing:.08em;background:#fbf7ef}tr:last-child td{border-bottom:0}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.url{font-weight:700;max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.muted{color:#8a8177}.badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:800;border:1px solid transparent}.b-ok{background:#ecfdf3;color:#126b3a;border-color:#c7ecd6}.b-warn{background:#fff7dc;color:#8a5a00;border-color:#f3df9f}.b-bad{background:#fff1f0;color:#a72b1d;border-color:#f3c2bb}.b-cool{background:#eef4ff;color:#2c5c9e;border-color:#cdddf5}.b-off{background:#f2eee8;color:#6f665a;border-color:#ddd2c1}.row-actions{display:flex;gap:6px;flex-wrap:wrap}.icon-btn{height:30px;border:1px solid #e0d6c7;background:#fff;border-radius:10px;padding:0 10px;font-size:12px;font-weight:700}.icon-btn:hover{background:#fff9ef}.danger{color:#a72b1d}.empty{padding:38px;text-align:center;color:#8a8177}.modal-backdrop{position:fixed;inset:0;background:rgba(24,20,16,.42);display:none;place-items:center;z-index:220;padding:20px}.modal-backdrop.open{display:grid}.modal{width:min(620px,100%);border-radius:24px;background:#fffaf3;border:1px solid #eadfce;box-shadow:0 30px 90px rgba(20,16,12,.2);padding:20px}.modal h2{margin:0 0 12px;font-size:22px;letter-spacing:-.03em}.form-grid{display:grid;gap:12px}.field{display:grid;gap:6px}.field label{font-size:12px;font-weight:800;color:#6f665a}.field input,.field select,.field textarea{border:1px solid #e0d6c7;background:#fff;border-radius:12px;padding:10px 12px;font-size:13px}.field textarea{min-height:180px;resize:vertical}.modal-footer{display:flex;justify-content:flex-end;gap:10px;margin-top:16px}.switch{width:42px;height:24px;border-radius:999px;background:#d8cec0;position:relative;transition:.15s}.switch:before{content:"";position:absolute;width:18px;height:18px;top:3px;left:3px;border-radius:999px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.16);transition:.15s}.switch.on{background:#1f1b16}.switch.on:before{transform:translateX(18px)}@media(max-width:980px){.proxy-hero{grid-template-columns:1fr}.panel{overflow:auto}.search{min-width:100%}}
+  </style>
+</head>
+<body>
+<div id="admin-header" data-active="/admin/proxies"></div>
+<main class="admin-main">
+  <section class="proxy-hero">
+    <div class="hero-card">
+      <div class="eyebrow">Console Egress Control</div>
+      <h1 class="title">Console 专用代理池</h1>
+      <p class="sub">仅接管 console.x.ai 请求。按账号 sticky 绑定代理，支持静态代理与 <span class="mono">{time}</span> 动态模板，模型瞬态 429 不会误伤代理。</p>
+      <div class="hero-actions">
+        <button class="btn btn-dark" id="addBtn">新增代理</button>
+        <button class="btn btn-soft" id="importBtn">批量导入</button>
+        <button class="btn btn-soft" id="clearBindingsBtn">清空绑定</button>
+        <a class="btn btn-soft" href="/admin/config">配置策略</a>
+      </div>
+    </div>
+    <div class="hero-card">
+      <div class="stats-grid">
+        <div class="stat"><div class="stat-value" id="statTotal">0</div><div class="stat-label">代理总数</div></div>
+        <div class="stat"><div class="stat-value" id="statActive">0</div><div class="stat-label">可调度</div></div>
+        <div class="stat"><div class="stat-value" id="statBindings">0</div><div class="stat-label">账号绑定</div></div>
+        <div class="stat"><div class="stat-value" id="statEnabled">OFF</div><div class="stat-label">代理池开关</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="toolbar">
+      <div class="filters">
+        <input id="q" class="search" placeholder="搜索 URL、ID、用户名、错误…">
+        <select id="status" class="select"><option value="">全部状态</option><option value="alive">Alive</option><option value="available">Available</option><option value="cooling_down">Cooling</option><option value="dead">Dead</option><option value="disabled">Disabled</option></select>
+        <label class="chip"><input id="onlyDynamic" type="checkbox">只看动态模板</label>
+        <label class="chip"><input id="onlyBad" type="checkbox">只看异常</label>
+      </div>
+      <button class="btn btn-soft" id="refreshBtn">刷新</button>
+    </div>
+    <table>
+      <thead><tr><th>代理</th><th>模式/状态</th><th>绑定/计数</th><th>最近错误</th><th>下次重试</th><th>启用</th><th>操作</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty" class="empty" hidden>暂无匹配代理</div>
+  </section>
+</main>
+
+<div class="modal-backdrop" id="editModal"><div class="modal">
+  <h2 id="editTitle">新增代理</h2>
+  <div class="form-grid">
+    <div class="field"><label>代理 URL</label><input id="formUrl" placeholder="http://user:pass@host:port 或 socks5://host:port"></div>
+    <div class="field"><label>用户名（可选，支持 {time}）</label><input id="formUsername"></div>
+    <div class="field"><label>密码（编辑时留空表示不修改）</label><input id="formPassword" type="password"></div>
+    <div class="field"><label>模式</label><select id="formMode"><option value="">自动推断</option><option value="static">static</option><option value="dynamic_template">dynamic_template</option></select></div>
+  </div>
+  <div class="modal-footer"><button class="btn btn-soft" data-close>取消</button><button class="btn btn-dark" id="saveBtn">保存</button></div>
+</div></div>
+
+<div class="modal-backdrop" id="importModal"><div class="modal">
+  <h2>批量导入代理</h2>
+  <div class="field"><label>每行一个代理 URL</label><textarea id="importText" placeholder="http://Default.{time}:password@host:9200"></textarea></div>
+  <div class="modal-footer"><button class="btn btn-soft" data-close>取消</button><button class="btn btn-dark" id="doImportBtn">导入</button></div>
+</div></div>
+
+<script src="/static/js/i18n.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/admin-header.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
+<script>
+const state = {items:[], enabled:false, bindingCount:0, q:'', status:'', onlyDynamic:false, onlyBad:false, editing:null};
+const rowsEl = document.getElementById('rows');
+const emptyEl = document.getElementById('empty');
+async function key(){ return await adminKey.get(); }
+async function api(method,path,body){ const k=await key(); const res=await fetch('/admin/api'+path,{method,headers:{Authorization:`Bearer ${k}`,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined}); const text=await res.text(); let data={}; try{data=text?JSON.parse(text):{};}catch{data={message:text}} if(!res.ok){throw new Error(data?.error?.message||data?.detail||data?.message||text||res.statusText)} return data; }
+function esc(v){return String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
+function badge(status){ const map={alive:['Alive','b-ok'],available:['Available','b-ok'],cooling_down:['Cooling','b-cool'],dead:['Dead','b-bad'],disabled:['Disabled','b-off']}; const [t,c]=map[status]||[status,'b-warn']; return `<span class="badge ${c}">${esc(t)}</span>`; }
+function time(v){ if(!v) return '<span class="muted">-</span>'; return new Date(v).toLocaleString(); }
+function filtered(){ const q=state.q.toLowerCase().trim(); return state.items.filter(p=>{ if(state.status&&p.status!==state.status)return false; if(state.onlyDynamic&&p.mode!=='dynamic_template')return false; if(state.onlyBad&&!['dead','cooling_down','disabled'].includes(p.status))return false; if(!q)return true; return [p.id,p.url,p.raw_url,p.username,p.last_error,p.mode,p.status].join(' ').toLowerCase().includes(q); }); }
+function renderStats(){ const active=state.items.filter(p=>['alive','available'].includes(p.status)&&p.enabled).length; document.getElementById('statTotal').textContent=state.items.length; document.getElementById('statActive').textContent=active; document.getElementById('statBindings').textContent=state.bindingCount; document.getElementById('statEnabled').textContent=state.enabled?'ON':'OFF'; }
+function render(){ renderStats(); const items=filtered(); rowsEl.innerHTML=items.map(p=>`<tr>
+<td><div class="url" title="${esc(p.raw_url||p.url)}">${esc(p.url)}</div><div class="muted mono">${esc(p.id.slice(0,12))} · gen ${p.generation} · epoch ${p.runtime_epoch}</div></td>
+<td>${badge(p.status)} <span class="badge ${p.mode==='dynamic_template'?'b-cool':'b-off'}">${esc(p.mode)}</span></td>
+<td><div>绑定 <b>${p.bound_account_count}</b></div><div class="muted">成功 ${p.success_count} / 失败 ${p.failure_count}</div></td>
+<td><div class="muted" title="${esc(p.last_error)}">${esc(p.last_error||'-')}</div><div class="muted">${p.last_failure_at?time(p.last_failure_at):''}</div></td>
+<td>${time(p.next_retry_at)}</td>
+<td><button class="switch ${p.enabled?'on':''}" data-enable="${esc(p.id)}" title="启用/禁用"></button></td>
+<td><div class="row-actions"><button class="icon-btn" data-edit="${esc(p.id)}">编辑</button><button class="icon-btn" data-test="${esc(p.id)}">测试</button><button class="icon-btn" data-reset="${esc(p.id)}">重置</button><button class="icon-btn danger" data-del="${esc(p.id)}">删除</button></div></td>
+</tr>`).join(''); emptyEl.hidden=items.length>0; bindRows(); }
+function bindRows(){ rowsEl.querySelectorAll('[data-enable]').forEach(b=>b.onclick=()=>toggleEnable(b.dataset.enable)); rowsEl.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEdit(b.dataset.edit)); rowsEl.querySelectorAll('[data-test]').forEach(b=>b.onclick=()=>testProxy(b.dataset.test)); rowsEl.querySelectorAll('[data-reset]').forEach(b=>b.onclick=()=>resetProxy(b.dataset.reset)); rowsEl.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>deleteProxy(b.dataset.del)); }
+async function load(){ const data=await api('GET','/proxies'); state.items=data.items||[]; state.enabled=!!data.enabled; state.bindingCount=data.binding_count||0; render(); }
+function openModal(id){document.getElementById(id).classList.add('open')} function closeModals(){document.querySelectorAll('.modal-backdrop').forEach(m=>m.classList.remove('open'))}
+function openEdit(id){ state.editing=id||null; const item=state.items.find(p=>p.id===id); document.getElementById('editTitle').textContent=item?'编辑代理':'新增代理'; document.getElementById('formUrl').value=item?.raw_url||''; document.getElementById('formUsername').value=item?.username||''; document.getElementById('formPassword').value=''; document.getElementById('formMode').value=item?.mode||''; openModal('editModal'); }
+async function save(){ const body={url:formUrl.value.trim(),username:formUsername.value.trim(),password:formPassword.value,mode:formMode.value||null}; if(!body.url){showToast('请填写代理 URL','error');return;} if(state.editing){ await api('PUT','/proxies/'+state.editing,body); showToast('代理已更新','success'); } else { await api('POST','/proxies',body); showToast('代理已新增','success'); } closeModals(); await load(); }
+async function doImport(){ await api('POST','/proxies/import',{text:importText.value}); showToast('导入完成','success'); closeModals(); importText.value=''; await load(); }
+async function toggleEnable(id){ const item=state.items.find(p=>p.id===id); await api('POST',`/proxies/${id}/enabled`,{enabled:!item.enabled}); await load(); }
+async function resetProxy(id){ await api('POST',`/proxies/${id}/reset`); showToast('运行态已重置','success'); await load(); }
+async function testProxy(id){ showToast('正在测试代理…','info'); const r=await api('POST',`/proxies/${id}/test`); showToast(`${r.ok?'测试通过':'测试失败'}：${r.message} (${r.latency_ms}ms)`, r.ok?'success':'error'); }
+async function deleteProxy(id){ if(!confirm('确认删除该代理？相关账号绑定会被清理。'))return; await api('DELETE','/proxies/'+id); showToast('代理已删除','success'); await load(); }
+async function clearBindings(){ if(!confirm('确认清空所有 Console 代理 sticky 绑定？'))return; const r=await api('DELETE','/proxies/bindings'); showToast(`已清空 ${r.cleared} 个绑定`,'success'); await load(); }
+document.getElementById('addBtn').onclick=()=>openEdit(null); document.getElementById('importBtn').onclick=()=>openModal('importModal'); document.getElementById('saveBtn').onclick=save; document.getElementById('doImportBtn').onclick=doImport; document.getElementById('refreshBtn').onclick=load; document.getElementById('clearBindingsBtn').onclick=clearBindings; document.querySelectorAll('[data-close]').forEach(b=>b.onclick=closeModals); document.querySelectorAll('.modal-backdrop').forEach(m=>m.onclick=e=>{if(e.target===m)closeModals()});
+document.getElementById('q').oninput=e=>{state.q=e.target.value;render()}; document.getElementById('status').onchange=e=>{state.status=e.target.value;render()}; document.getElementById('onlyDynamic').onchange=e=>{state.onlyDynamic=e.target.checked;render()}; document.getElementById('onlyBad').onchange=e=>{state.onlyBad=e.target.checked;render()};
+(async()=>{ await renderAdminHeader?.(); const k=await key(); if(!k||!await verifyKey('/admin/api/verify',k).catch(()=>false)){location.href='/admin/login';return;} await load(); })().catch(e=>{console.error(e);showToast(`代理池加载失败：${e.message}`,'error')});
+</script>
+</body>
+</html>
