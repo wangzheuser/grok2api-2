@@ -21,6 +21,14 @@ from ..quota_defaults import default_quota_set, BASIC_CONSOLE_LIMIT, BASIC_CONSO
 
 _TBL = "accounts"
 _META = "account_meta"
+_TOKEN_PAYLOAD_QUOTAS = (
+    ("auto",      "quota_auto",      True),
+    ("fast",      "quota_fast",      True),
+    ("expert",    "quota_expert",    True),
+    ("heavy",     "quota_heavy",     False),
+    ("grok_4_3",  "quota_grok_4_3",  False),  # 补上，避免 super/heavy 账号余额显示为空
+    ("console",   "quota_console",   True),
+)
 
 
 class LocalAccountRepository:
@@ -37,8 +45,13 @@ class LocalAccountRepository:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.OperationalError:
+            # WAL 模式在 NFS / 某些 Docker bind mount 文件系统上不支持，
+            # 静默 fallback 到默认 DELETE journal mode，功能不受影响。
+            pass
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
@@ -85,6 +98,8 @@ class LocalAccountRepository:
                     ON {_TBL} (pool, status);
                 CREATE INDEX IF NOT EXISTS idx_acc_deleted
                     ON {_TBL} (deleted_at) WHERE deleted_at IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_acc_live_updated
+                    ON {_TBL} (updated_at DESC) WHERE deleted_at IS NULL;
             """)
             self._ensure_column_sync(conn, "quota_grok_4_3", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column_sync(conn, "quota_console", "TEXT NOT NULL DEFAULT '{}'")
@@ -160,6 +175,41 @@ class LocalAccountRepository:
             "deleted_at":       record.deleted_at,
             "ext":              json.dumps(record.ext),
             "revision":         revision,
+        }
+
+    @staticmethod
+    def _parse_tags(raw: Any) -> list[str]:
+        try:
+            tags = json.loads(raw or "[]")
+        except (TypeError, ValueError):
+            return []
+        return tags if isinstance(tags, list) else []
+
+    @staticmethod
+    def _payload_int(value: Any) -> int:
+        return int(value or 0)
+
+    @classmethod
+    def _row_to_token_payload(cls, row: sqlite3.Row) -> dict[str, Any]:
+        quota: dict[str, dict[str, int]] = {}
+        for mode, _column, always_include in _TOKEN_PAYLOAD_QUOTAS:
+            remaining = row[f"{mode}_remaining"]
+            total = row[f"{mode}_total"]
+            if always_include or remaining is not None or total is not None:
+                quota[mode] = {
+                    "remaining": cls._payload_int(remaining),
+                    "total": cls._payload_int(total),
+                }
+
+        return {
+            "token": row["token"],
+            "pool": row["pool"] or "basic",
+            "status": row["status"],
+            "quota": quota,
+            "use_count": cls._payload_int(row["usage_use_count"]),
+            "fail_count": cls._payload_int(row["usage_fail_count"]),
+            "last_used_at": row["last_use_at"],
+            "tags": cls._parse_tags(row["tags"]),
         }
 
     def _upsert_sync(
@@ -517,6 +567,103 @@ class LocalAccountRepository:
                 )
 
         return await asyncio.to_thread(_sync)
+
+    @classmethod
+    def _token_payload_select_sql(cls) -> str:
+        quota_select = ", ".join(
+            f"CASE WHEN json_valid({column}) "
+            f"THEN json_extract({column}, '$.remaining') END AS {mode}_remaining, "
+            f"CASE WHEN json_valid({column}) "
+            f"THEN json_extract({column}, '$.total') END AS {mode}_total"
+            for mode, column, _always_include in _TOKEN_PAYLOAD_QUOTAS
+        )
+        return f"""
+            SELECT
+                token,
+                pool,
+                status,
+                tags,
+                usage_use_count,
+                usage_fail_count,
+                last_use_at,
+                {quota_select}
+            FROM {_TBL}
+            WHERE deleted_at IS NULL
+            ORDER BY updated_at DESC
+            """
+
+    async def list_token_payloads(self) -> list[dict[str, Any]]:
+        """Return the compact payload needed by the admin account list."""
+
+        def _sync() -> list[dict[str, Any]]:
+            with closing(self._connect()) as conn:
+                cursor = conn.execute(self._token_payload_select_sql())
+                return [self._row_to_token_payload(r) for r in cursor]
+
+        return await asyncio.to_thread(_sync)
+
+    async def list_invalid_tokens(self) -> list[str]:
+        def _sync() -> list[str]:
+            with closing(self._connect()) as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT token
+                    FROM {_TBL}
+                    WHERE deleted_at IS NULL
+                      AND status NOT IN (?, ?, ?, ?)
+                    ORDER BY updated_at DESC
+                    """,
+                    (
+                        AccountStatus.ACTIVE.value,
+                        AccountStatus.COOLING.value,
+                        AccountStatus.DISABLED.value,
+                        AccountStatus.EXPIRED.value,  # EXPIRED 是配额误判，不当作垃圾删除
+                    ),
+                )
+                return [row["token"] for row in rows]
+
+        return await asyncio.to_thread(_sync)
+
+    async def purge_deleted_accounts(
+        self,
+        *,
+        deleted_before_ms: int,
+        batch_size: int = 5000,
+        vacuum: bool = True,
+    ) -> int:
+        def _sync() -> int:
+            total = 0
+            limit = max(1, int(batch_size))
+            with closing(self._connect()) as conn:
+                while True:
+                    rows = conn.execute(
+                        f"""
+                        SELECT token
+                        FROM {_TBL}
+                        WHERE deleted_at IS NOT NULL
+                          AND deleted_at < ?
+                        ORDER BY deleted_at
+                        LIMIT ?
+                        """,
+                        (deleted_before_ms, limit),
+                    ).fetchall()
+                    if not rows:
+                        break
+                    cursor = conn.executemany(
+                        f"DELETE FROM {_TBL} WHERE token = ?",
+                        [(row["token"],) for row in rows],
+                    )
+                    affected = cursor.rowcount if cursor.rowcount >= 0 else len(rows)
+                    total += int(affected)
+                    conn.commit()
+                    if affected <= 0:
+                        break
+                if total > 0 and vacuum:
+                    conn.execute("VACUUM")
+            return total
+
+        async with self._lock:
+            return await asyncio.to_thread(_sync)
 
     async def replace_pool(
         self,
