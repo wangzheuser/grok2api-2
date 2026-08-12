@@ -15,6 +15,7 @@ import orjson
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import UpstreamError, ValidationError
+from app.platform.net.remote_fetch import fetch_remote_asset
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.headers import build_sso_cookie
 from app.dataplane.proxy.adapters.headers import build_http_headers
@@ -182,40 +183,10 @@ async def upload_from_input(token: str, file_input: str) -> tuple[str, str]:
     Returns ``(file_id, file_uri)``.
     """
     if _is_url(file_input):
-        # Fetch the remote URL and re-upload as base64.
-        proxy = await get_proxy_runtime()
-        lease = await proxy.acquire()
-        try:
-            headers = build_http_headers(token, lease=lease)
-            kwargs  = build_session_kwargs(lease=lease)
-            async with ResettableSession(**kwargs) as session:
-                resp = await session.get(file_input, headers=headers, timeout=30.0)
-            raw  = resp.content
-            if resp.status_code != 200:
-                await proxy.feedback(
-                    lease,
-                    ProxyFeedback(
-                        kind        = ProxyFeedbackKind.UPSTREAM_5XX if resp.status_code >= 500
-                                      else ProxyFeedbackKind.FORBIDDEN,
-                        status_code = resp.status_code,
-                    ),
-                )
-                raise UpstreamError(
-                    f"Failed to fetch input URL: {resp.status_code}",
-                    status = resp.status_code,
-                )
-            mime     = (resp.headers.get("content-type", "").split(";")[0].strip()
-                        or "application/octet-stream")
-            filename = file_input.split("/")[-1].split("?")[0] or "download"
-            b64      = base64.b64encode(raw).decode()
-        except UpstreamError:
-            raise
-        except Exception as exc:
-            await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR))
-            raise UpstreamError(f"Asset fetch transport error: {exc}") from exc
-
-        await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS))
-        return await upload_file(token, filename, mime, b64)
+        # 用户 URL 使用独立的受限客户端抓取，不复用上游 Cookie、代理身份或会话。
+        remote = await fetch_remote_asset(file_input)
+        b64 = base64.b64encode(remote.content).decode()
+        return await upload_file(token, remote.filename, remote.mime_type, b64)
 
     # Data URI
     filename, b64, mime = parse_data_uri(file_input)

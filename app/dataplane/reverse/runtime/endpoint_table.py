@@ -44,7 +44,7 @@ WS_LIVEKIT        = "wss://livekit.grok.com"
 LIVEKIT_TOKENS    = f"{BASE}/rest/livekit/tokens"              # POST
 
 # ── Console API (console.x.ai) ───────────────────────────────────────────
-# 使用 Bearer token 认证，与 grok.com SSO token 共享同一套凭证
+# 使用 SSO Cookie 交换短期 DPoP token，并以请求级 proof 认证
 CONSOLE_RESPONSES = f"{CONSOLE_BASE}/v1/responses"             # POST (OpenAI Responses API)
 CONSOLE_CHAT      = f"{CONSOLE_BASE}/v1/chat/completions"      # POST (OpenAI Chat API)
 

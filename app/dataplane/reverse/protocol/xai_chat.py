@@ -1,8 +1,10 @@
-"""XAI app-chat protocol — payload builder and SSE stream adapter."""
+"""XAI Web protocol — legacy payload builder and MGW/REST stream adapter."""
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import orjson
 
@@ -124,7 +126,18 @@ def stream_error_from_payload(obj: dict[str, Any]) -> UpstreamError | None:
     message = str(raw_message)
     code = error.get("code")
     text = message.lower()
-    status = 429 if code == 8 or "too many requests" in text or "rate limit" in text else 502
+    if code == 7 or "anti-bot" in text:
+        status = 403
+    elif (
+        code == 8
+        or "too many requests" in text
+        or "rate limit" in text
+        or "usage limit" in text
+        or "usage quota" in text
+    ):
+        status = 429
+    else:
+        status = 502
 
     try:
         body = orjson.dumps(obj).decode()
@@ -208,10 +221,10 @@ _TOOL_FMT: dict[str, tuple[str, tuple[str, ...]]] = {
 
 
 class StreamAdapter:
-    """Parse upstream SSE frames and emit :class:`FrameEvent` objects.
+    """Parse upstream MGW envelopes or legacy REST frames into ``FrameEvent``.
 
-    One instance per HTTP request.  Call :meth:`feed` for every ``data:``
-    line; iterate over the returned list of events.
+    One instance per Web request. Call :meth:`feed` for every decoded JSON
+    payload and iterate over the returned events.
     """
 
     __slots__ = (
@@ -229,6 +242,8 @@ class StreamAdapter:
         "_content_started",
         "_web_search_results",
         "_web_search_urls_seen",
+        "conversation_id",
+        "parent_response_id",
         "thinking_buf",
         "text_buf",
         "image_urls",
@@ -250,6 +265,8 @@ class StreamAdapter:
         self._reasoning = ReasoningAggregator() if self._summary_mode else None
         self._web_search_results: list[dict] = []
         self._web_search_urls_seen: set[str] = set()
+        self.conversation_id: str = ""
+        self.parent_response_id: str = ""
         self.thinking_buf: list[str] = []
         self.text_buf: list[str] = []
         self.image_urls: list[tuple[str, str]] = []   # [(url, imageUuid), ...]
@@ -300,6 +317,9 @@ class StreamAdapter:
             obj = orjson.loads(data)
         except (orjson.JSONDecodeError, ValueError, TypeError):
             return []
+        gateway_event = obj.get("event")
+        if isinstance(gateway_event, dict):
+            return self._feed_gateway_event(gateway_event)
         raise_for_stream_error(obj)
 
         result = obj.get("result")
@@ -455,6 +475,260 @@ class StreamAdapter:
 
         return events
 
+    def _feed_gateway_event(self, event: dict[str, Any]) -> list[FrameEvent]:
+        """解析一个 MGW event，并复用现有 FrameEvent 输出契约。"""
+        event_type = str(event.get("type") or "")
+        if event_type == "conversation.attached":
+            conversation = event.get("conversation")
+            if isinstance(conversation, dict):
+                self.conversation_id = str(conversation.get("id") or "")
+            return []
+
+        if event_type == "response.chunk":
+            chunk = event.get("chunk")
+            if not isinstance(chunk, dict):
+                return []
+            events: list[FrameEvent] = []
+            card = chunk.get("tool_usage_card")
+            if isinstance(card, dict):
+                events.extend(self._handle_gateway_tool_card(card))
+            result = chunk.get("tool_result")
+            if isinstance(result, dict):
+                self._handle_gateway_tool_result(result)
+            citation = chunk.get("render_citation")
+            if isinstance(citation, dict):
+                events.extend(self._handle_gateway_citation(citation))
+            text = chunk.get("text")
+            if isinstance(text, dict):
+                events.extend(
+                    self._append_gateway_delta(
+                        str(text.get("channel") or ""),
+                        str(text.get("text") or ""),
+                    )
+                )
+            return events
+
+        if event_type == "response.output_text.delta":
+            return self._append_gateway_delta(
+                "CHANNEL_ASSISTANT_RESPONSE",
+                str(event.get("delta") or ""),
+            )
+        if event_type == "response.output_text.done":
+            if not self.text_buf:
+                return self._append_gateway_delta(
+                    "CHANNEL_ASSISTANT_RESPONSE",
+                    str(event.get("text") or ""),
+                )
+            return []
+        if event_type == "response.search.result":
+            result = event.get("result")
+            if isinstance(result, dict):
+                self._append_gateway_source(
+                    str(result.get("url") or ""),
+                    str(result.get("title") or ""),
+                    "web",
+                )
+            return []
+        if event_type == "response.grok.output":
+            output = event.get("output")
+            if not isinstance(output, dict):
+                return []
+            stream_error = output.get("stream_error")
+            if isinstance(stream_error, dict):
+                self._raise_gateway_error(stream_error)
+            return self._handle_gateway_card_attachment(output.get("card_attachment"))
+        if event_type == "response.done":
+            events: list[FrameEvent] = []
+            response = event.get("response")
+            if isinstance(response, dict):
+                self.parent_response_id = str(response.get("id") or "")
+                status = str(response.get("status") or "")
+                if status and status != "completed":
+                    raise UpstreamError(
+                        f"Grok Gateway response status is {status}",
+                        status=502,
+                    )
+            self._flush_pending_reasoning(events)
+            events.append(FrameEvent("soft_stop"))
+            return events
+        if event_type == "error":
+            error = event.get("error")
+            self._raise_gateway_error(error if isinstance(error, dict) else {})
+        return []
+
+    def _append_gateway_delta(self, channel: str, delta: str) -> list[FrameEvent]:
+        """按 MGW channel 将增量分流到正文或思考事件。"""
+        if not delta:
+            return []
+        normalized = channel.strip().upper()
+        if "ANALYSIS" in normalized or "REASONING" in normalized:
+            self.thinking_buf.append(delta)
+            return [FrameEvent("thinking", delta)]
+        if normalized and normalized != "CHANNEL_ASSISTANT_RESPONSE":
+            return []
+        self._content_started = True
+        self._last_citation_index = -1
+        self.text_buf.append(delta)
+        self._text_offset += len(delta)
+        return [FrameEvent("text", delta)]
+
+    def _handle_gateway_tool_card(self, card: dict[str, Any]) -> list[FrameEvent]:
+        """将 MGW 搜索工具卡转换为现有思考事件。"""
+        if self._content_started:
+            return []
+        card_id = str(card.get("tool_usage_card_id") or card.get("id") or "")
+        if card_id:
+            cache_key = f"gateway-tool:{card_id}"
+        else:
+            cache_key = f"gateway-tool:{hashlib.sha256(orjson.dumps(card)).hexdigest()}"
+        if cache_key in self._card_cache:
+            return []
+        self._card_cache[cache_key] = card
+
+        tool_name = ""
+        tool_value: dict[str, Any] = {}
+        for candidate in ("web_search", "x_search"):
+            value = card.get(candidate)
+            if isinstance(value, dict):
+                tool_name = candidate
+                tool_value = value
+                break
+        if not tool_name:
+            return []
+        args = tool_value.get("args") if isinstance(tool_value.get("args"), dict) else tool_value
+        if self._summary_mode and self._reasoning is not None:
+            events: list[FrameEvent] = []
+            for line in self._reasoning.on_tool_usage(tool_name, args, rollout="", step_id=None):
+                self._append_reasoning(events, line, rollout="", tag="tool_usage_card", step_id=None)
+            return events
+
+        query = str(args.get("query") or "").strip()
+        emoji = _TOOL_FMT.get(tool_name, ("🔧", ()))[0]
+        line = f"{emoji} {tool_name}: {query}" if query else f"{emoji} {tool_name}"
+        events = []
+        self._append_reasoning(events, line, rollout="", tag="tool_usage_card", step_id=None)
+        return events
+
+    def _handle_gateway_tool_result(self, result: dict[str, Any]) -> None:
+        """从 MGW 工具结果累计 Web 与 X 搜索信源。"""
+        web_search = result.get("web_search")
+        if isinstance(web_search, dict):
+            pages = web_search.get("webpages")
+            if isinstance(pages, list):
+                for page in pages:
+                    if isinstance(page, dict):
+                        self._append_gateway_source(
+                            str(page.get("url") or ""),
+                            str(page.get("title") or ""),
+                            "web",
+                        )
+
+        x_post = result.get("x_post")
+        if isinstance(x_post, dict):
+            posts = x_post.get("posts")
+            if isinstance(posts, list):
+                for post in posts:
+                    if not isinstance(post, dict):
+                        continue
+                    handle = str(post.get("userhandle") or post.get("username") or "").strip().lstrip("@")
+                    post_id = str(post.get("post_id") or post.get("postId") or "").strip()
+                    if not handle or not post_id:
+                        continue
+                    title = str(post.get("name") or handle)
+                    text = re.sub(r"\s+", " ", str(post.get("text") or "")).strip()
+                    if text:
+                        title = f"{title}: {text}"
+                    self._append_gateway_source(
+                        f"https://x.com/{handle}/status/{post_id}",
+                        title,
+                        "x_post",
+                    )
+
+    def _append_gateway_source(self, url: str, title: str, source_type: str) -> None:
+        """校验并去重一个 Gateway 搜索信源。"""
+        parsed = urlparse(url.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return
+        normalized = parsed.geturl()
+        if normalized in self._web_search_urls_seen:
+            return
+        self._web_search_urls_seen.add(normalized)
+        self._web_search_results.append(
+            {"url": normalized, "title": title or normalized, "type": source_type}
+        )
+
+    def _handle_gateway_citation(self, citation: dict[str, Any]) -> list[FrameEvent]:
+        """把 MGW render_citation 转换成正文 marker 和绝对位置 annotation。"""
+        raw_url = str(citation.get("url") or "").strip()
+        parsed = urlparse(raw_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return []
+        url = parsed.geturl()
+        index = self._citation_map.get(url)
+        if index is None:
+            self._citation_order.append(url)
+            index = len(self._citation_order)
+            self._citation_map[url] = index
+        if index == self._last_citation_index:
+            return []
+        self._last_citation_index = index
+
+        title = next(
+            (
+                str(item.get("title") or "")
+                for item in self._web_search_results
+                if item.get("url") == url
+            ),
+            "",
+        )
+        marker = f" [[{index}]]({url})"
+        annotation = {
+            "type": "url_citation",
+            "url": url,
+            "title": title or url,
+            "start_index": self._text_offset,
+            "end_index": self._text_offset + len(marker),
+        }
+        self._content_started = True
+        self.text_buf.append(marker)
+        self._text_offset += len(marker)
+        self._annotations.append(annotation)
+        return [
+            FrameEvent("text", marker),
+            FrameEvent("annotation", annotation_data=annotation),
+        ]
+
+    def _handle_gateway_card_attachment(self, value: Any) -> list[FrameEvent]:
+        """递归处理 MGW card_attachment 中已完成的生成图片。"""
+        if isinstance(value, list):
+            events: list[FrameEvent] = []
+            for item in value:
+                events.extend(self._handle_gateway_card_attachment(item))
+            return events
+        if not isinstance(value, dict):
+            return []
+        raw = value.get("jsonData", value)
+        if isinstance(raw, str):
+            try:
+                data = orjson.loads(raw)
+            except orjson.JSONDecodeError:
+                return []
+        elif isinstance(raw, dict):
+            data = raw
+        else:
+            return []
+        if not isinstance(data, dict):
+            return []
+        return self._handle_card({"jsonData": orjson.dumps(data)})
+
+    @staticmethod
+    def _raise_gateway_error(error: dict[str, Any]) -> None:
+        """沿用 Web stream error 分类抛出 Gateway 错误。"""
+        exc = stream_error_from_payload({"error": error})
+        if exc is not None:
+            raise exc
+        raise UpstreamError("Grok Gateway returned an unknown error", status=502)
+
     # ------------------------------------------------------------------
     # Card attachment handling
     # ------------------------------------------------------------------
@@ -480,7 +754,7 @@ class StreamAdapter:
             except (TypeError, ValueError):
                 pass
             if chunk.get("progress") == 100 and not chunk.get("moderated"):
-                url = _IMAGE_BASE + chunk["imageUrl"]
+                url = _IMAGE_BASE + str(chunk["imageUrl"]).lstrip("/")
                 self.image_urls.append((url, uuid))
                 events.append(FrameEvent("image", url, uuid))
             return events

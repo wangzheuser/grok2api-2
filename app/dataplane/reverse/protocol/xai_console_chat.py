@@ -1,7 +1,7 @@
 """XAI console.x.ai chat protocol — payload builder and SSE stream adapter.
 
 端点: POST https://console.x.ai/v1/responses
-认证: Authorization: Bearer anonymous  +  Cookie: sso=<token>; sso-rw=<token>
+认证: SSO Cookie 交换短期 DPoP token，再以 ES256 proof 绑定每次请求
 
 请求格式 (OpenAI Responses API):
 {
@@ -39,6 +39,11 @@ from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
 from app.control.proxy.models import ProxyFeedbackKind
 from app.dataplane.reverse.protocol.tool_parser import ParsedToolCall
+from app.dataplane.reverse.transport.console_dpop import (
+    ConsoleDPoPTokenError,
+    ConsoleDPoPTransportError,
+    console_dpop_manager,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -810,6 +815,10 @@ def _classify_console_error_body(body: str) -> str:
     normalized = body.lower()
     if not body:
         return "empty_body"
+    if _is_dpop_proof_required(normalized):
+        return "dpop_required"
+    if "blocked-user" in normalized or "user is blocked" in normalized:
+        return "account_blocked"
     if "insufficient_model_capacity" in normalized or "model capacity" in normalized:
         return "upstream_capacity"
     if "monthly_request_count" in normalized or "quota" in normalized:
@@ -825,6 +834,12 @@ def _classify_console_error_body(body: str) -> str:
     if "cloudflare" in normalized or "cf_clearance" in normalized or "challenge" in normalized:
         return "cloudflare_challenge"
     return "unknown"
+
+
+def _is_dpop_proof_required(value: str) -> bool:
+    """识别 Console DPoP 协议升级提示的常见拼写。"""
+    normalized = re.sub(r"[-:.\s]+", "_", value.strip().lower())
+    return "unauthorized_dpop_required" in normalized or "dpop_proof_required" in normalized
 
 
 def _console_non_200_code(status: int, body_class: str) -> str:
@@ -853,7 +868,6 @@ async def stream_console_chat(
     走现有的 proxy lease + curl-cffi 体系，与 grok.com 共用 CF clearance。
     """
     from app.dataplane.proxy import get_proxy_runtime
-    from app.dataplane.proxy.adapters.headers import build_console_headers
     from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
     from app.dataplane.reverse.runtime.endpoint_table import CONSOLE_RESPONSES
 
@@ -869,19 +883,36 @@ async def stream_console_chat(
             fallback_lease_factory=proxy.acquire,
             clearance_origin="https://console.x.ai",
         )
-        headers = build_console_headers(token, lease=lease)
         session_kwargs = build_session_kwargs(lease=lease)
 
         async with ResettableSession(**session_kwargs) as session:
             try:
-                response = await session.post(
-                    CONSOLE_RESPONSES,
-                    headers=headers,
-                    data=payload_bytes,
-                    timeout=timeout_s,
-                    stream=True,
+                response = await _post_console_dpop(
+                    session=session,
+                    token=token,
+                    lease=lease,
+                    endpoint=CONSOLE_RESPONSES,
+                    payload_bytes=payload_bytes,
+                    timeout_s=timeout_s,
                 )
-            except Exception as exc:
+                failure_status = response.status_code
+                failure_headers = response.headers
+                failure_body = ""
+                if failure_status != 200:
+                    try:
+                        failure_body = (await response.acontent()).decode("utf-8", "replace")[:400]
+                        await response.aclose()
+                    except Exception as exc:
+                        raise ConsoleDPoPTransportError(
+                            f"Console error response read failed: {exc}",
+                            status=502,
+                        ) from exc
+            except ConsoleDPoPTokenError as exc:
+                response = None
+                failure_status = exc.status
+                failure_body = str(exc.details.get("body") or "")[:400]
+                failure_headers = {}
+            except ConsoleDPoPTransportError as exc:
                 feedback = _transport_error_feedback(str(exc))
                 await _feedback_console_proxy(proxy, console_pool, lease, feedback)
                 if _should_retry_console_proxy(lease, feedback, proxy_attempt, max_proxy_retries):
@@ -895,23 +926,20 @@ async def stream_console_chat(
                     continue
                 raise UpstreamError(f"Console transport failed: {exc}", status=502) from exc
 
-            if response.status_code != 200:
-                try:
-                    body = response.content.decode("utf-8", "replace")[:400]
-                except Exception:
-                    body = ""
-                retry_after = response.headers.get("retry-after", "")
+            if failure_status != 200:
+                body = failure_body
+                retry_after = failure_headers.get("retry-after", "")
                 proxy_hash = _short_hash(lease.proxy_url or "")
                 raw_body_class = _classify_console_error_body(body)
-                body_class = _console_non_200_body_class(response.status_code, body)
-                error_code = _console_non_200_code(response.status_code, raw_body_class)
+                body_class = _console_non_200_body_class(failure_status, body)
+                error_code = _console_non_200_code(failure_status, raw_body_class)
                 logger.warning(
                     (
                         "console upstream non-200 observed: status={} model={} effort={} "
                         "token_hash={} proxy_hash={} has_proxy={} proxy_pool={} proxy_id={} body_class={} "
                         "body_len={} body_sha256={} retry_after={} body_preview={}"
                     ),
-                    response.status_code,
+                    failure_status,
                     payload.get("model", ""),
                     (payload.get("reasoning") or {}).get("effort", ""),
                     _short_hash(token),
@@ -925,7 +953,7 @@ async def stream_console_chat(
                     retry_after,
                     _sanitize_observation_text(body),
                 )
-                feedback = _status_feedback(response.status_code, body_class)
+                feedback = _status_feedback(failure_status, body_class)
                 await _feedback_console_proxy(proxy, console_pool, lease, feedback)
                 if _should_retry_console_proxy(lease, feedback, proxy_attempt, max_proxy_retries):
                     logger.warning(
@@ -933,12 +961,12 @@ async def stream_console_chat(
                         proxy_attempt + 1,
                         max_proxy_retries + 1,
                         lease.proxy_id or "-",
-                        response.status_code,
+                        failure_status,
                     )
                     continue
                 raise UpstreamError(
-                    f"Console API returned {response.status_code}",
-                    status=response.status_code,
+                    f"Console API returned {failure_status}",
+                    status=failure_status,
                     body=body,
                     code=error_code,
                     details={
@@ -949,6 +977,8 @@ async def stream_console_chat(
                     },
                 )
 
+            if response is None:
+                raise UpstreamError("Console response state is invalid", status=502)
             await _feedback_console_proxy(proxy, console_pool, lease, _success_feedback())
 
             current_event = ""
@@ -970,6 +1000,58 @@ async def stream_console_chat(
                         return
             except Exception as exc:
                 raise UpstreamError(f"Console stream read failed: {exc}", status=502) from exc
+
+
+async def _post_console_dpop(
+    *,
+    session,
+    token: str,
+    lease,
+    endpoint: str,
+    payload_bytes: bytes,
+    timeout_s: float,
+):
+    """发送已签名的 Console 请求，并在首次 401 后刷新 DPoP 会话一次。"""
+    for auth_attempt in range(2):
+        authorization = await console_dpop_manager.authorize(
+            http_session=session,
+            token=token,
+            lease=lease,
+            method="POST",
+            url=endpoint,
+            timeout_s=timeout_s,
+        )
+        try:
+            response = await session.post(
+                endpoint,
+                headers=authorization.headers,
+                data=payload_bytes,
+                timeout=timeout_s,
+                stream=True,
+            )
+        except Exception as exc:
+            raise ConsoleDPoPTransportError(
+                f"Console request transport failed: {exc}",
+                status=502,
+            ) from exc
+        if response.status_code != 401 or auth_attempt > 0:
+            return response
+
+        # 消费首个 401 流并按 token 值条件失效，避免并发刷新误删新会话。
+        try:
+            await response.acontent()
+            await response.aclose()
+        except Exception as exc:
+            raise ConsoleDPoPTransportError(
+                f"Console 401 response read failed: {exc}",
+                status=502,
+            ) from exc
+        finally:
+            await console_dpop_manager.invalidate(
+                authorization.cache_key,
+                authorization.access_token,
+            )
+    raise UpstreamError("Console DPoP retry state is invalid", status=502)
 
 
 async def _get_console_proxy_pool_safe():
@@ -1004,7 +1086,7 @@ def _status_feedback(status: int, body_class: str = ""):
         kind = ProxyFeedbackKind.SUCCESS
     elif status == 407:
         kind = ProxyFeedbackKind.UNAUTHORIZED
-    elif status == 403:
+    elif status == 403 and body_class not in {"dpop_required", "account_blocked"}:
         kind = ProxyFeedbackKind.CHALLENGE
     elif status == 429:
         kind = ProxyFeedbackKind.RATE_LIMITED

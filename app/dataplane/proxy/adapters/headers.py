@@ -313,33 +313,20 @@ def build_console_headers(
     lease: ProxyLease | None = None,
     content_type: str = "application/json",
 ) -> dict[str, str]:
-    """Build headers for console.x.ai/v1/responses requests.
+    """Build browser and SSO headers for Console requests.
 
-    抓包确认的认证方式：
-    - Authorization: Bearer anonymous  （固定值）
-    - Cookie: sso=<token>; sso-rw=<token>; cf_clearance=...  （身份 + CF clearance）
-
-    cf_clearance 从 proxy lease 的 clearance profile 中获取（与 grok.com 共用同一套机制）。
+    DPoP ``Authorization``、``DPoP`` 和 responses 专用 ``x-cluster`` 由
+    Console DPoP transport 按具体请求附加，token 交换阶段不会误带旧认证头。
     """
-    tok = sso_token[4:] if sso_token.startswith("sso=") else sso_token
-    tok = _sanitize(tok, field="sso_token", strip_spaces=True)
-
-    # 复用现有 clearance profile（cf_clearance / user_agent）
     profile = _resolve_profile(lease)
     ua = _sanitize(profile.user_agent, field="user_agent")
-    cf_clearance = _sanitize(profile.cf_clearance, field="cf_clearance", strip_spaces=True)
-
-    cookie = f"sso={tok}; sso-rw={tok}"
-    if cf_clearance:
-        cookie += f"; cf_clearance={cf_clearance}"
 
     headers: dict[str, str] = {
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br, zstd",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Authorization": "Bearer anonymous",
         "Content-Type": content_type,
-        "Cookie": cookie,
+        "Cookie": build_sso_cookie(sso_token, lease=lease),
         "Origin": "https://console.x.ai",
         "Priority": "u=1, i",
         "Referer": "https://console.x.ai/",
@@ -351,7 +338,6 @@ def build_console_headers(
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/136.0.0.0 Safari/537.36"
         ),
-        "x-cluster": "https://us-east-1.api.x.ai",
     }
     headers.update(_client_hints(profile.browser, profile.user_agent))
     return headers

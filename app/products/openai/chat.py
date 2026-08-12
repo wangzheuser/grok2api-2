@@ -24,20 +24,14 @@ from app.control.model.registry import resolve as resolve_model
 from app.control.model.enums import ModeId
 from app.control.account.enums import FeedbackKind
 from app.dataplane.account.selector import current_strategy
-from app.dataplane.proxy.adapters.headers import build_http_headers
 from app.dataplane.proxy import get_proxy_runtime
-from app.dataplane.proxy.adapters.session import (
-    ResettableSession,
-    build_session_kwargs,
-)
 from app.dataplane.reverse.protocol.xai_chat import (
-    build_chat_payload,
     classify_line,
     StreamAdapter,
 )
 from app.dataplane.reverse.protocol.xai_usage import is_invalid_credentials_error
-from app.dataplane.reverse.runtime.endpoint_table import CHAT
 from app.dataplane.reverse.transport.asset_upload import upload_from_input
+from app.dataplane.reverse.transport.web_gateway import stream_gateway_chat
 from app.dataplane.reverse.protocol.tool_prompt import (
     build_tool_system_prompt,
     extract_tool_names,
@@ -92,17 +86,6 @@ def _upstream_body_excerpt(exc: UpstreamError, *, limit: int = 240) -> str:
         return "-"
     body = str(details.get("body", "") or "").replace("\n", "\\n")
     return body[:limit] or "-"
-
-
-def _transport_upstream_error(exc: BaseException, *, context: str) -> UpstreamError:
-    if isinstance(exc, UpstreamError):
-        return exc
-    body = str(exc).replace("\n", "\\n")[:400]
-    return UpstreamError(
-        f"{context}: {exc}",
-        status=502,
-        body=body,
-    )
 
 
 async def _quota_sync(token: str, mode_id: int) -> None:
@@ -388,62 +371,26 @@ async def _stream_chat(
     request_overrides: dict | None = None,
     timeout_s: float = 120.0,
 ) -> AsyncGenerator[str, None]:
-    """Yield raw SSE lines from the Grok app-chat endpoint."""
+    """Yield MGW JSON frames from the Grok Web Gateway."""
     proxy = await get_proxy_runtime()
     lease = await proxy.acquire()
     attachments = await _prepare_file_attachments(token, files)
-
-    payload = build_chat_payload(
-        message=message,
+    custom_instruction = get_config().get_str("features.custom_instruction", "").strip()
+    prompt = (
+        f"[system]: {custom_instruction}\n\n{message}"
+        if custom_instruction
+        else message
+    )
+    async for frame in stream_gateway_chat(
+        token=token,
         mode_id=mode_id,
-        file_attachments=attachments,
-        tool_overrides=tool_overrides,
-        model_config_override=model_config_override,
-        request_overrides=request_overrides,
-    )
-    payload_bytes = orjson.dumps(payload)
-
-    headers = build_http_headers(
-        token,
-        content_type="application/json",
-        origin="https://grok.com",
-        referer="https://grok.com/",
+        prompt=prompt,
+        attachments=attachments,
         lease=lease,
-    )
-    session_kwargs = build_session_kwargs(lease=lease)
-
-    async with ResettableSession(**session_kwargs) as session:
-        try:
-            response = await session.post(
-                CHAT,
-                headers=headers,
-                data=payload_bytes,
-                timeout=timeout_s,
-                stream=True,
-            )
-        except Exception as exc:
-            raise _transport_upstream_error(
-                exc, context="Chat transport failed"
-            ) from exc
-
-        if response.status_code != 200:
-            try:
-                body = response.content.decode("utf-8", "replace")[:400]
-            except Exception:
-                body = ""
-            raise UpstreamError(
-                f"Chat upstream returned {response.status_code}",
-                status=response.status_code,
-                body=body,
-            )
-
-        try:
-            async for line in response.aiter_lines():
-                yield line
-        except Exception as exc:
-            raise _transport_upstream_error(
-                exc, context="Chat stream read failed"
-            ) from exc
+        timeout_s=timeout_s,
+        request_overrides=request_overrides,
+    ):
+        yield frame
 
 
 async def completions(
