@@ -1,140 +1,221 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from app.control.proxy import ProxyDirectory
-from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
-from app.platform.errors import UpstreamError
+from app.control.proxy.managed_pool import account_key_for_token
+from app.control.proxy.models import (
+    EgressMode,
+    ProxyLease,
+    ProxyProvider,
+    ProxyRequestContext,
+    ProxyScope,
+    RequestKind,
+)
+from app.control.proxy.service import (
+    HEALTH_ACCOUNT_KEY,
+    DirectProxyProvider,
+    ResinProxyProvider,
+    ProxyService,
+    render_resin_proxy_url,
+    resin_uuid_for_account,
+)
 
 
 class _ProxyConfig:
-    def __init__(self, values):
-        self.values = values
+    """为代理提供者暴露最小配置快照接口。"""
+
+    def __init__(self, data):
+        self._data = data
 
     def get_str(self, key, default=""):
-        return str(self.values.get(key, default))
+        """读取测试配置字符串。"""
+        node = self._data
+        for part in key.split("."):
+            if not isinstance(node, dict) or part not in node:
+                return default
+            node = node[part]
+        return str(node)
 
-    def get_list(self, key, default=None):
-        return self.values.get(key, default or [])
-
-    def get_int(self, key, default=0):
-        return int(self.values.get(key, default))
+    def raw(self):
+        """返回完整测试配置。"""
+        return self._data
 
 
-class ProxyDirectoryPoolTests(unittest.IsolatedAsyncioTestCase):
-    def _config(self, strategy: str) -> _ProxyConfig:
-        """构造包含基础池和资源池的测试配置。"""
-        return _ProxyConfig(
+class UnifiedProxyProviderTests(unittest.IsolatedAsyncioTestCase):
+    def test_resin_uuid_is_stable_and_token_is_not_exposed(self):
+        """相同归一化账号应得到同一 UUID，UUID 中不出现原始 token。"""
+        plain = account_key_for_token("secret-token")
+        prefixed = account_key_for_token("sso=secret-token")
+
+        first = resin_uuid_for_account(plain)
+        second = resin_uuid_for_account(prefixed)
+
+        self.assertEqual(first, second)
+        self.assertNotIn("secret-token", first)
+        self.assertEqual(resin_uuid_for_account(HEALTH_ACCOUNT_KEY), resin_uuid_for_account(HEALTH_ACCOUNT_KEY))
+
+    def test_resin_template_replaces_every_uuid_consistently(self):
+        """同一模板中的全部 UUID 占位符应使用同一账号身份。"""
+        rendered = render_resin_proxy_url(
+            "https://node.{uuid}:token@proxy.test:8443/path/{uuid}",
+            "account-key",
+        )
+        expected = resin_uuid_for_account("account-key")
+
+        self.assertEqual(rendered.count(expected), 2)
+        self.assertNotIn("{uuid}", rendered)
+
+    async def test_direct_provider_returns_direct_lease(self):
+        """直连提供者应通过统一 clearance 门面生成无代理租约。"""
+        clearance = AsyncMock()
+        clearance.acquire_lease.return_value = ProxyLease(lease_id="direct")
+        context = ProxyRequestContext(
+            account_key="account",
+            origin="https://grok.com",
+            scope=ProxyScope.APP,
+            kind=RequestKind.HTTP,
+        )
+
+        lease = await DirectProxyProvider(clearance).acquire(context)
+
+        self.assertFalse(lease.has_proxy)
+        clearance.acquire_lease.assert_awaited_once_with(
+            proxy_url=None,
+            affinity_key="direct",
+            provider=ProxyProvider.DIRECT,
+            account_key="account",
+            scope=ProxyScope.APP,
+            kind=RequestKind.HTTP,
+            clearance_origin="https://grok.com",
+        )
+
+    async def test_resin_provider_uses_account_affinity(self):
+        """Resin 提供者应渲染稳定 UUID 并只返回 Resin 租约。"""
+        config = _ProxyConfig(
             {
-                "proxy.egress.mode": "proxy_pool",
-                "proxy.egress.rotation_strategy": strategy,
-                "proxy.egress.proxy_pool": [
-                    "http://base-1:8080",
-                    "http://base-2:8080",
-                ],
-                "proxy.egress.resource_proxy_pool": [
-                    "http://resource-1:8080",
-                    "http://resource-2:8080",
-                ],
-                "proxy.clearance.mode": "none",
+                "proxy": {
+                    "egress": {"mode": "resin"},
+                    "resin": {
+                        "url_template": "https://node.{uuid}:token@proxy.test:8443"
+                    },
+                    "pool": {"entries": []},
+                    "health": {"concurrency": 20},
+                }
             }
         )
-
-    async def test_round_robin_rotates_each_pool_independently(self):
-        """逐请求轮询时，基础流量和资源流量应分别维护游标。"""
-        directory = ProxyDirectory()
-        with patch(
-            "app.control.proxy.get_config",
-            return_value=self._config("round_robin"),
-        ):
-            await directory.load()
-            base = [
-                await directory.acquire(),
-                await directory.acquire(),
-                await directory.acquire(),
-            ]
-            resources = [
-                await directory.acquire(resource=True),
-                await directory.acquire(resource=True),
-                await directory.acquire(resource=True),
-            ]
-
-        self.assertEqual(
-            [lease.proxy_url for lease in base],
-            ["http://base-1:8080", "http://base-2:8080", "http://base-1:8080"],
+        clearance = AsyncMock()
+        clearance.acquire_lease.side_effect = lambda **kwargs: ProxyLease(
+            lease_id="resin",
+            proxy_url=kwargs["proxy_url"],
+            provider=kwargs["provider"],
+            affinity_key=kwargs["affinity_key"],
+            origin=kwargs["clearance_origin"],
         )
-        self.assertEqual(
-            [lease.proxy_url for lease in resources],
-            [
-                "http://resource-1:8080",
-                "http://resource-2:8080",
-                "http://resource-1:8080",
-            ],
+        context = ProxyRequestContext(
+            account_key="account",
+            origin="https://console.x.ai",
+            scope=ProxyScope.APP,
+            kind=RequestKind.WEBSOCKET,
         )
-        self.assertEqual(base[0].proxy_pool, "global")
-        self.assertEqual(resources[0].proxy_pool, "global_resource")
 
-    async def test_sticky_failover_rotates_only_failed_pool(self):
-        """粘性策略应只推进发生失败的代理池。"""
-        directory = ProxyDirectory()
-        with patch(
-            "app.control.proxy.get_config",
-            return_value=self._config("sticky_failover"),
-        ):
-            await directory.load()
-            first = await directory.acquire()
-            same = await directory.acquire()
-            first_resource = await directory.acquire(resource=True)
-            await directory.feedback(
-                first,
-                ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR),
+        provider = ResinProxyProvider(clearance)
+        with patch("app.control.proxy.service.get_config", return_value=config):
+            lease = await provider.acquire(context)
+            cross_scope = await provider.acquire(
+                ProxyRequestContext(
+                    account_key="account",
+                    origin="https://assets.grok.com",
+                    scope=ProxyScope.ASSET,
+                    kind=RequestKind.HTTP,
+                )
             )
-            # 同一旧节点的并发失败反馈不应再次跳过新节点。
-            await directory.feedback(
-                same,
-                ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR),
+            other_account = await provider.acquire(
+                ProxyRequestContext(
+                    account_key="other-account",
+                    origin="https://grok.com",
+                )
             )
-            next_base = await directory.acquire()
-            same_resource = await directory.acquire(resource=True)
 
-        self.assertEqual(first.proxy_url, same.proxy_url)
-        self.assertEqual(next_base.proxy_url, "http://base-2:8080")
-        self.assertEqual(first_resource.proxy_url, same_resource.proxy_url)
+        expected_uuid = resin_uuid_for_account("account")
+        self.assertEqual(lease.provider, ProxyProvider.RESIN)
+        self.assertEqual(lease.affinity_key, f"resin:{expected_uuid}")
+        self.assertIn(expected_uuid, lease.proxy_url)
+        self.assertEqual(lease.origin, "https://console.x.ai")
+        self.assertEqual(cross_scope.affinity_key, lease.affinity_key)
+        self.assertNotEqual(other_account.affinity_key, lease.affinity_key)
 
-    async def test_invalid_runtime_config_fails_closed(self):
-        """手工写入的空固定代理配置应在请求阶段返回稳定 503。"""
-        directory = ProxyDirectory()
-        cfg = _ProxyConfig(
+    async def test_derived_origin_keeps_same_provider_identity(self):
+        """复合子步骤应只派生 origin clearance，不重新选择出口。"""
+        clearance = AsyncMock()
+        clearance.acquire_lease.return_value = ProxyLease(
+            lease_id="derived",
+            proxy_url="https://node.account:token@proxy.test:8443",
+            provider=ProxyProvider.RESIN,
+            affinity_key="resin:stable",
+            origin="https://assets.grok.com",
+        )
+        pool = AsyncMock()
+        service = ProxyService(pool, clearance)
+        parent = ProxyLease(
+            lease_id="parent",
+            proxy_url="https://node.account:token@proxy.test:8443",
+            provider=ProxyProvider.RESIN,
+            affinity_key="resin:stable",
+            account_key="account",
+            proxy_id="resin-gateway",
+            proxy_mode="uuid_template",
+            generation=7,
+            runtime_epoch=2,
+            origin="https://grok.com",
+        )
+
+        derived = await service.derive(
+            parent,
+            origin="https://assets.grok.com",
+            scope=ProxyScope.ASSET,
+            kind=RequestKind.HTTP,
+        )
+
+        self.assertEqual(derived.proxy_url, parent.proxy_url)
+        self.assertEqual(derived.affinity_key, parent.affinity_key)
+        self.assertEqual(derived.proxy_id, parent.proxy_id)
+        self.assertEqual(derived.generation, parent.generation)
+        self.assertEqual(derived.runtime_epoch, parent.runtime_epoch)
+        clearance.acquire_lease.assert_awaited_once_with(
+            proxy_url=parent.proxy_url,
+            affinity_key=parent.affinity_key,
+            provider=parent.provider,
+            account_key=parent.account_key,
+            scope=ProxyScope.ASSET,
+            kind=RequestKind.HTTP,
+            clearance_origin="https://assets.grok.com",
+        )
+
+    async def test_resin_hot_reload_does_not_load_managed_pool(self):
+        """Resin 热切换只加载路由与 clearance，不同步托管池仓储。"""
+        config = _ProxyConfig(
             {
-                "proxy.egress.mode": "single_proxy",
-                "proxy.egress.proxy_url": "",
-                "proxy.clearance.mode": "none",
+                "proxy": {
+                    "egress": {"mode": "resin"},
+                    "resin": {
+                        "url_template": (
+                            "http://node.{uuid}:token@172.17.0.1:9200"
+                        )
+                    },
+                    "pool": {"entries": []},
+                    "health": {"concurrency": 20},
+                }
             }
         )
-        with patch("app.control.proxy.get_config", return_value=cfg):
-            await directory.load()
-            with self.assertRaises(UpstreamError) as caught:
-                await directory.acquire()
+        pool = AsyncMock()
+        clearance = AsyncMock()
+        service = ProxyService(pool, clearance)
 
-        self.assertEqual(caught.exception.status, 503)
-        self.assertEqual(caught.exception.code, "egress_proxy_unavailable")
+        with patch("app.control.proxy.service.get_config", return_value=config):
+            await service.reload_config(load_managed_pool=False)
 
-    async def test_explicit_override_bypasses_invalid_global_config(self):
-        """Console 专用 override 不应被全局 direct 或脏配置阻止。"""
-        directory = ProxyDirectory()
-        cfg = _ProxyConfig(
-            {
-                "proxy.egress.mode": "proxy_pool",
-                "proxy.egress.proxy_pool": [],
-                "proxy.clearance.mode": "none",
-            }
-        )
-        with patch("app.control.proxy.get_config", return_value=cfg):
-            await directory.load()
-            lease = await directory.acquire(
-                proxy_url_override="http://console:8080"
-            )
-
-        self.assertEqual(lease.proxy_url, "http://console:8080")
+        self.assertEqual(service.mode, EgressMode.RESIN)
+        pool.load.assert_not_awaited()
+        clearance.load.assert_awaited_once()
 
 
 if __name__ == "__main__":

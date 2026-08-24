@@ -376,8 +376,8 @@
         },
         "proxyMode": {
           "direct": "直连",
-          "singleProxy": "代理（固定）",
-          "proxyPool": "代理（轮转）"
+          "managedPool": "托管代理池",
+          "resin": "Resin"
         },
         "clearanceMode": {
           "none": "关闭",
@@ -517,23 +517,7 @@
         },
         "proxyMode": {
           "label": "代理模式",
-          "desc": "控制出站流量代理策略。direct 为直连；single_proxy 使用固定代理；proxy_pool 在代理池中轮转。"
-        },
-        "proxyUrl": {
-          "label": "基础代理 URL",
-          "desc": "API 流量的出站代理地址，支持 http、https、socks5 协议。"
-        },
-        "resourceProxyUrl": {
-          "label": "资源代理 URL",
-          "desc": "图片、视频等媒体资源下载的专用代理地址；留空时回落至基础代理。"
-        },
-        "proxyPool": {
-          "label": "基础代理池",
-          "desc": "API 流量代理池，每行一个代理 URL；具体选点行为由轮换策略控制。"
-        },
-        "resourceProxyPool": {
-          "label": "资源代理池",
-          "desc": "媒体资源下载专用代理池，每行一个代理 URL；留空时回落至基础代理池。"
+          "desc": "全部 Grok、xAI Console、资源、SSE 与 WebSocket 请求共用直连、托管代理池或 Resin 中的一种出口。"
         },
         "skipSslVerify": {
           "label": "跳过 SSL 校验",

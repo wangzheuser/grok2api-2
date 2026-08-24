@@ -1,6 +1,7 @@
 """Typed configuration snapshot — built once at startup, reloaded on change."""
 
 import asyncio
+import copy
 import os
 import re
 from pathlib import Path
@@ -133,6 +134,10 @@ class ConfigSnapshot:
             await backend.apply_patch(patch)
             # Invalidate so next load() call pulls the new version.
             self._version = None
+
+    async def user_overrides(self) -> dict[str, Any]:
+        """返回持久化用户覆盖的副本，供幂等配置迁移判断字段来源。"""
+        return copy.deepcopy(await self._get_backend().load())
 
     def raw(self) -> dict[str, Any]:
         return dict(self._data)

@@ -29,11 +29,12 @@ from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
 from app.platform.storage import save_local_video
 from app.control.account.enums import FeedbackKind
+from app.control.proxy.models import ProxyLease, ProxyScope, RequestKind
 from app.control.model import registry as model_registry
 from app.control.model.registry import resolve as resolve_model
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.headers import build_http_headers
-from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+from app.dataplane.proxy.adapters.session import ResettableSession
 from app.dataplane.reverse.protocol.xai_assets import (
     resolve_asset_reference,
     resolve_download_url,
@@ -324,9 +325,11 @@ async def _stream_video_request(
     *,
     referer: str,
     timeout_s: float,
+    lease: ProxyLease | None = None,
 ) -> AsyncGenerator[str, None]:
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire()
+    if lease is None:
+        lease = await proxy.acquire(token=token)
     headers = build_http_headers(
         token,
         content_type="application/json",
@@ -334,9 +337,7 @@ async def _stream_video_request(
         referer=referer,
         lease=lease,
     )
-    kwargs = build_session_kwargs(lease=lease)
-
-    async with ResettableSession(**kwargs) as session:
+    async with ResettableSession(lease=lease) as session:
         response = await session.post(
             CHAT,
             headers=headers,
@@ -370,7 +371,10 @@ def _is_upstream_asset_content_url(value: str) -> bool:
 
 
 async def _prepare_video_reference(
-    token: str, input_reference: dict[str, Any]
+    token: str,
+    input_reference: dict[str, Any],
+    *,
+    lease: ProxyLease,
 ) -> _VideoReference:
     file_id = str(input_reference.get("file_id") or "").strip()
     image_input = str(input_reference.get("image_url") or "").strip()
@@ -395,7 +399,9 @@ async def _prepare_video_reference(
     else:
         try:
             uploaded_file_id, uploaded_file_uri = await upload_from_input(
-                token, image_input
+                token,
+                image_input,
+                lease=lease,
             )
             content_url = resolve_uploaded_asset_reference(
                 token, uploaded_file_id, uploaded_file_uri
@@ -419,6 +425,7 @@ async def _prepare_video_reference(
         media_url=content_url,
         prompt="",
         referer="https://grok.com/imagine",
+        lease=lease,
     )
     post_data = post.get("post")
     if not isinstance(post_data, dict):
@@ -434,10 +441,12 @@ async def _prepare_video_reference(
 async def _prepare_video_references(
     token: str,
     input_references: list[dict[str, Any]],
+    *,
+    lease: ProxyLease,
 ) -> list[_VideoReference]:
     """Upload multiple video references concurrently and preserve order."""
     tasks = [
-        _prepare_video_reference(token, ref)
+        _prepare_video_reference(token, ref, lease=lease)
         for ref in input_references
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -484,6 +493,7 @@ async def _collect_video_segment(
     referer: str,
     timeout_s: float,
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
+    lease: ProxyLease,
 ) -> _VideoArtifact:
     final_url = ""
     final_asset_id = ""
@@ -496,6 +506,7 @@ async def _collect_video_segment(
         payload,
         referer=referer,
         timeout_s=timeout_s,
+        lease=lease,
     ):
         event_type, data = classify_line(line)
         if event_type == "done":
@@ -562,9 +573,14 @@ async def _collect_video_segment(
     )
 
 
-async def _download_video_bytes(token: str, url: str) -> tuple[bytes, str]:
+async def _download_video_bytes(
+    token: str,
+    url: str,
+    *,
+    lease: ProxyLease | None = None,
+) -> tuple[bytes, str]:
     try:
-        stream, content_type = await download_asset(token, url)
+        stream, content_type = await download_asset(token, url, lease=lease)
         chunks: list[bytes] = []
         async for chunk in stream:
             chunks.append(chunk)
@@ -608,7 +624,13 @@ def _render_video_html(url: str) -> str:
     return f'<video controls src="{safe_url}"></video>'
 
 
-async def _resolve_video_output(*, token: str, url: str, file_id: str) -> str:
+async def _resolve_video_output(
+    *,
+    token: str,
+    url: str,
+    file_id: str,
+    lease: ProxyLease | None = None,
+) -> str:
     fmt = _normalize_video_format(
         get_config().get_str("features.video_format", "grok_url")
     )
@@ -618,7 +640,7 @@ async def _resolve_video_output(*, token: str, url: str, file_id: str) -> str:
         return _render_video_html(url)
 
     try:
-        raw, _mime = await _download_video_bytes(token, url)
+        raw, _mime = await _download_video_bytes(token, url, lease=lease)
         await asyncio.to_thread(_save_video_bytes, raw, file_id)
     except Exception as exc:
         logger.debug("video download fallback_to=upstream_url error={}", exc)
@@ -639,10 +661,15 @@ async def _generate_video_with_token(
     timeout_s: float,
     input_references: list[dict[str, Any]] | None = None,
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
+    lease: ProxyLease,
 ) -> _VideoArtifact:
     references: list[_VideoReference] = []
     if input_references:
-        references = await _prepare_video_references(token, input_references)
+        references = await _prepare_video_references(
+            token,
+            input_references,
+            lease=lease,
+        )
         parent_post_id = references[0].post_id
     else:
         post = await create_media_post(
@@ -650,6 +677,7 @@ async def _generate_video_with_token(
             media_type=_VIDEO_MEDIA_TYPE,
             prompt=prompt,
             referer="https://grok.com/imagine",
+            lease=lease,
         )
         post_data = post.get("post")
         if not isinstance(post_data, dict):
@@ -705,6 +733,7 @@ async def _generate_video_with_token(
             referer=referer,
             timeout_s=timeout_s,
             progress_cb=_segment_progress if progress_cb is not None else None,
+            lease=lease,
         )
         if index == 0 and total_segments > 1:
             artifact.remixed_from_video_id = artifact.video_post_id or parent_post_id
@@ -727,7 +756,11 @@ async def _run_video_generation(
     input_references: list[dict[str, Any]] | None = None,
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
 ) -> _VideoArtifact:
-    async def _runner(token: str, timeout_s: float) -> _VideoArtifact:
+    async def _runner(
+        token: str,
+        timeout_s: float,
+        lease: ProxyLease,
+    ) -> _VideoArtifact:
         return await _generate_video_with_token(
             token=token,
             prompt=prompt,
@@ -738,6 +771,7 @@ async def _run_video_generation(
             timeout_s=timeout_s,
             input_references=input_references,
             progress_cb=progress_cb,
+            lease=lease,
         )
 
     return await _run_video_with_account(model=model, runner=_runner)
@@ -746,7 +780,7 @@ async def _run_video_generation(
 async def _run_video_with_account(
     *,
     model: str,
-    runner: Callable[[str, float], Awaitable[Any]],
+    runner: Callable[[str, float, ProxyLease], Awaitable[Any]],
 ) -> Any:
     cfg = get_config()
     timeout_s = cfg.get_float("video.timeout", 180.0)
@@ -771,7 +805,14 @@ async def _run_video_with_account(
     success = False
     fail_exc: BaseException | None = None
     try:
-        artifact = await runner(token, timeout_s)
+        proxy = await get_proxy_runtime()
+        lease = await proxy.acquire(
+            token=token,
+            scope=ProxyScope.APP,
+            kind=RequestKind.HTTP,
+            clearance_origin="https://grok.com",
+        )
+        artifact = await runner(token, timeout_s, lease)
         success = True
         return artifact
     except BaseException as exc:
@@ -861,6 +902,13 @@ async def _run_video_job(
         try:
             cfg = get_config()
             timeout_s = cfg.get_float("video.timeout", 180.0)
+            proxy = await get_proxy_runtime()
+            lease = await proxy.acquire(
+                token=token,
+                scope=ProxyScope.APP,
+                kind=RequestKind.HTTP,
+                clearance_origin="https://grok.com",
+            )
 
             async def _progress(progress: int) -> None:
                 await _set_job_status(
@@ -877,8 +925,13 @@ async def _run_video_job(
                 timeout_s=timeout_s,
                 input_references=input_references,
                 progress_cb=_progress,
+                lease=lease,
             )
-            raw, _mime = await _download_video_bytes(token, artifact.video_url)
+            raw, _mime = await _download_video_bytes(
+                token,
+                artifact.video_url,
+                lease=lease,
+            )
             success = True
         except BaseException as exc:
             fail_exc = exc
@@ -1065,7 +1118,11 @@ async def completions(
     response_id = make_response_id()
 
     async def _run(progress_cb: Callable[[int], Awaitable[None]] | None = None) -> str:
-        async def _runner(token: str, timeout_s: float) -> str:
+        async def _runner(
+            token: str,
+            timeout_s: float,
+            lease: ProxyLease,
+        ) -> str:
             artifact = await _generate_video_with_token(
                 token=token,
                 prompt=prompt,
@@ -1076,12 +1133,14 @@ async def completions(
                 timeout_s=timeout_s,
                 input_references=input_references,
                 progress_cb=progress_cb,
+                lease=lease,
             )
             file_id = hashlib.sha1(artifact.video_url.encode("utf-8")).hexdigest()[:32]
             return await _resolve_video_output(
                 token=token,
                 url=artifact.video_url,
                 file_id=file_id,
+                lease=lease,
             )
 
         return await _run_video_with_account(model=model, runner=_runner)

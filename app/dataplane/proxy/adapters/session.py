@@ -8,7 +8,7 @@ from curl_cffi.const import CurlOpt
 
 from app.platform.config.snapshot import get_config
 from app.platform.errors import UpstreamError
-from app.control.proxy.models import ProxyLease
+from app.control.proxy.models import ProxyLease, ProxyProvider
 from app.dataplane.proxy.adapters.profile import resolve_proxy_profile
 
 
@@ -68,14 +68,26 @@ def build_session_kwargs(
     return kwargs
 
 
-def _wrap_transport_error(exc: BaseException) -> UpstreamError:
+def _wrap_transport_error(
+    exc: BaseException,
+    lease: ProxyLease | None,
+) -> UpstreamError:
+    """把 Resin 网关连接失败映射为统一的失败关闭错误。"""
     if isinstance(exc, UpstreamError):
         return exc
-    body = str(exc).replace("\n", "\\n")[:400]
+    if lease is not None and lease.provider == ProxyProvider.RESIN:
+        return UpstreamError(
+            "Egress proxy is unavailable",
+            status=503,
+            code="egress_proxy_unavailable",
+        )
+    # 底层库异常可能包含完整代理 URL，错误边界只保留异常类型。
+    body = f"{type(exc).__name__}: transport request failed"
     return UpstreamError(
-        f"Transport request failed: {exc}",
+        "Transport request failed",
         status=502,
         body=body,
+        code="egress_transport_error",
     )
 
 
@@ -94,6 +106,7 @@ class ResettableSession:
         reset_on_status: set[int] | None = None,
         **session_kwargs: Any,
     ) -> None:
+        self._lease = lease
         self._kwargs = build_session_kwargs(
             lease=lease,
             browser_override=browser_override,
@@ -131,7 +144,18 @@ class ResettableSession:
             response = await getattr(self._session, method)(*args, **kwargs)
         except Exception as exc:
             self._reset_pending = True
-            raise _wrap_transport_error(exc) from exc
+            raise _wrap_transport_error(exc, self._lease) from exc
+        if (
+            self._lease is not None
+            and self._lease.provider == ProxyProvider.RESIN
+            and response.status_code in {407, 502, 503}
+        ):
+            self._reset_pending = True
+            raise UpstreamError(
+                "Egress proxy is unavailable",
+                status=503,
+                code="egress_proxy_unavailable",
+            )
         if self._reset_on and response.status_code in self._reset_on:
             self._reset_pending = True
         return response

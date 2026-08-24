@@ -371,8 +371,8 @@
         },
         "proxyMode": {
           "direct": "直接接続",
-          "singleProxy": "固定プロキシ",
-          "proxyPool": "プロキシプール"
+          "managedPool": "管理プロキシプール",
+          "resin": "Resin"
         },
         "clearanceMode": {
           "none": "無効",
@@ -414,10 +414,6 @@
         "assetListConcurrency": { "label": "Asset 一覧取得並列数" },
         "assetDeleteConcurrency": { "label": "Asset 削除並列数" },
         "proxyMode": { "label": "プロキシモード" },
-        "proxyUrl": { "label": "プライマリプロキシ URL" },
-        "resourceProxyUrl": { "label": "リソースプロキシ URL" },
-        "proxyPool": { "label": "プライマリプロキシプール" },
-        "resourceProxyPool": { "label": "リソースプロキシプール" },
         "skipSslVerify": { "label": "SSL 検証をスキップ" },
         "clearanceMode": { "label": "Clearance モード" },
         "browserFingerprint": { "label": "ブラウザフィンガープリント" },

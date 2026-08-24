@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
+from app.platform.runtime.clock import now_ms
+from ..managed_pool import mask_proxy_url, sanitize_proxy_error
 from ..models import ClearanceBundle, ClearanceMode
 
 
@@ -43,7 +45,7 @@ class FlareSolverrClearanceProvider:
         if not result:
             logger.warning(
                 "flaresolverr clearance refresh failed: affinity={} proxy={} target={}",
-                affinity_key, proxy_url or "<direct>", target_url,
+                affinity_key, mask_proxy_url(proxy_url) or "<direct>", target_url,
             )
             return None
         host = result.get("clearance_host", "grok.com")
@@ -54,6 +56,7 @@ class FlareSolverrClearanceProvider:
             user_agent   = result.get("user_agent", ""),
             affinity_key = affinity_key,
             clearance_host = host,
+            last_refresh_at = now_ms(),
         )
 
     async def _solve(
@@ -90,7 +93,8 @@ class FlareSolverrClearanceProvider:
             if result.get("status") != "ok":
                 logger.warning(
                     "flaresolverr returned non-ok status: status={} message={}",
-                    result.get("status"), result.get("message", ""),
+                    result.get("status"),
+                    sanitize_proxy_error(str(result.get("message", ""))),
                 )
                 return None
 
@@ -115,11 +119,21 @@ class FlareSolverrClearanceProvider:
 
         except HTTPError as exc:
             body_text = exc.read().decode("utf-8", "replace")[:300]
-            logger.warning("flaresolverr http request failed: status={} body={}", exc.code, body_text)
+            logger.warning(
+                "flaresolverr http request failed: status={} body={}",
+                exc.code,
+                sanitize_proxy_error(body_text),
+            )
         except URLError as exc:
-            logger.warning("flaresolverr connection failed: reason={}", exc.reason)
+            logger.warning(
+                "flaresolverr connection failed: reason={}",
+                sanitize_proxy_error(str(exc.reason)),
+            )
         except Exception as exc:
-            logger.warning("flaresolverr request failed: error={}", exc)
+            logger.warning(
+                "flaresolverr request failed: error_type={}",
+                type(exc).__name__,
+            )
 
         return None
 

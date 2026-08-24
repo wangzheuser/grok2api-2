@@ -71,21 +71,49 @@ video_max_mb = 0
 
 
 # ==================== 代理配置 ====================
+[proxy]
+# 统一代理配置版本；旧用户覆盖未记录该值时由启动迁移补齐
+schema_version = 2
+
 [proxy.egress]
-# 出口模式：direct | single_proxy | proxy_pool
+# 出口模式：direct | managed_pool | resin
 mode = "direct"
-# 基础代理 URL（API 流量，single_proxy 模式必填）
-proxy_url = ""
-# 基础代理池（API 流量，proxy_pool 模式必填）
-proxy_pool = []
-# 代理池轮换策略：sticky_failover | round_robin | random
-rotation_strategy = "sticky_failover"
-# 资源代理 URL（图片/视频下载，未配置则回落到 proxy_url）
-resource_proxy_url = ""
-# 资源代理池（图片/视频下载，未配置则回落到 proxy_pool）
-resource_proxy_pool = []
 # 跳过代理 SSL 证书验证（代理使用自签名证书时启用）
 skip_ssl_verify = false
+
+[proxy.resin]
+# Resin HTTP/HTTPS 正向代理模板；{uuid} 按 Grok 账号稳定替换
+url_template = ""
+
+[proxy.pool]
+# 本地托管代理条目，由后台网络代理池页面维护
+entries = []
+# 同一账号遇到代理硬失败时，本请求最多重绑代理重试次数
+max_proxy_retries_per_request = 1
+# 403 / challenge 软失败达到多少次后切换代理
+challenge_failure_threshold = 2
+# 静态代理失败后的冷却时长（秒）
+static_cooldown_sec = 300
+# 动态模板代理失败后的初始退避（秒）
+dynamic_retry_base_sec = 60
+# 动态模板代理失败后的最大退避（秒）
+dynamic_retry_max_sec = 600
+# 动态模板代理连续失败退避因子
+dynamic_backoff_factor = 2.0
+# 账号 sticky 绑定闲置清理时间（秒），默认 7 天
+binding_idle_ttl_sec = 604800
+
+[proxy.health]
+# 是否启用后台定时连通性检测
+enabled = true
+# 代理检测地址
+check_url = "https://console.x.ai/"
+# 代理检测间隔（秒）
+check_interval_sec = 300
+# 代理检测超时（秒）
+check_timeout_sec = 15
+# 单个 Worker 执行健康任务的最大并发数
+concurrency = 20
 
 [proxy.clearance]
 # Cloudflare clearance 模式：none | manual | flaresolverr
@@ -102,6 +130,8 @@ flaresolverr_url = ""
 timeout_sec = 60
 # Clearance 刷新间隔（秒）
 refresh_interval = 3600
+# 按出口身份与目标域名缓存的 bundle 数量上限
+max_cached_bundles = 2048
 
 
 # ==================== 重试策略 ====================
@@ -132,38 +162,6 @@ breaker_ttl_sec = 180
 fast_fail_without_fallback = true
 
 
-
-[console.proxy_pool]
-# 是否启用 Console 专用代理池；仅影响 console.x.ai 请求
-enabled = false
-# Console 代理池无可调度代理时是否回退到全局 proxy.egress
-fallback_to_global_proxy = false
-# 同一账号遇到代理硬失败时，本请求最多重绑代理重试次数
-max_proxy_retries_per_request = 1
-# 403 / challenge 软失败达到多少次后切换代理
-challenge_failure_threshold = 2
-# 静态代理失败后的冷却时长（秒）
-static_cooldown_sec = 300
-# 动态模板代理失败后的初始退避（秒）
-dynamic_retry_base_sec = 60
-# 动态模板代理失败后的最大退避（秒）
-dynamic_retry_max_sec = 600
-# 动态模板代理连续失败退避因子
-dynamic_backoff_factor = 2.0
-# 是否启用后台定时连通性检测
-health_check_enabled = true
-# 代理检测地址
-health_check_url = "https://console.x.ai/"
-# 代理检测间隔（秒）
-health_check_interval_sec = 300
-# 代理检测超时（秒）
-health_check_timeout_sec = 15
-# 单个 Worker 执行健康任务的最大并发数
-health_check_concurrency = 20
-# 账号 sticky 绑定闲置清理时间（秒），默认 7 天
-binding_idle_ttl_sec = 604800
-# Console 专用代理条目，由后台代理池页维护
-entries = []
 
 [account.refresh]
 # 总开关：true=配额刷新模式（主动探测，选号评分）；false=自动重试模式（随机选号，零探测）

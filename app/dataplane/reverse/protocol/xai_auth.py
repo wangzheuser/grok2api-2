@@ -8,13 +8,15 @@ import datetime
 import random
 from typing import TYPE_CHECKING
 
+from app.control.account.identity import account_log_key
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import UpstreamError
 from app.platform.net.grpc import GrpcClient, GrpcStatus
+from app.control.proxy.feedback import feedback_for_upstream_error
 from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind, ProxyScope, RequestKind
 from app.dataplane.proxy import get_proxy_runtime
-from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+from app.dataplane.proxy.adapters.session import ResettableSession
 from app.dataplane.reverse.runtime.endpoint_table import (
     ACCEPT_TOS as ACCEPT_TOS_URL,
     BASE as GROK_ORIGIN,
@@ -99,6 +101,7 @@ async def _grpc_call(
     if not shared:
         proxy = await get_proxy_runtime()
         lease = await proxy.acquire(
+            token=token,
             scope=ProxyScope.APP,
             kind=RequestKind.HTTP,
             clearance_origin=origin,
@@ -112,11 +115,7 @@ async def _grpc_call(
         )
     except UpstreamError as exc:
         if not shared:
-            await proxy.feedback(lease, ProxyFeedback(
-                kind=ProxyFeedbackKind.UPSTREAM_5XX if (exc.status or 0) >= 500
-                     else ProxyFeedbackKind.FORBIDDEN,
-                status_code=exc.status or 502,
-            ))
+            await proxy.feedback(lease, _error_feedback(exc))
         raise
     except Exception as exc:
         if not shared:
@@ -195,6 +194,7 @@ async def set_birth_date(
     if not shared:
         proxy = await get_proxy_runtime()
         lease = await proxy.acquire(
+            token=token,
             scope=ProxyScope.APP,
             kind=RequestKind.HTTP,
             clearance_origin=GROK_ORIGIN,
@@ -210,11 +210,7 @@ async def set_birth_date(
         )
     except UpstreamError as exc:
         if not shared:
-            await proxy.feedback(lease, ProxyFeedback(
-                kind=ProxyFeedbackKind.UPSTREAM_5XX if (exc.status or 0) >= 500
-                     else ProxyFeedbackKind.FORBIDDEN,
-                status_code=exc.status or 502,
-            ))
+            await proxy.feedback(lease, _error_feedback(exc))
         raise
     except Exception as exc:
         if not shared:
@@ -238,14 +234,14 @@ async def nsfw_sequence(token: str) -> None:
 
     proxy = await get_proxy_runtime()
     lease = await proxy.acquire(
+        token=token,
         scope=ProxyScope.APP,
         kind=RequestKind.HTTP,
         clearance_origin=GROK_ORIGIN,
     )
 
-    kwargs = build_session_kwargs(lease=lease)
     try:
-        async with ResettableSession(**kwargs) as session:
+        async with ResettableSession(lease=lease) as session:
             try:
                 await set_birth_date(token, session=session, lease=lease)
             except UpstreamError as exc:
@@ -255,7 +251,7 @@ async def nsfw_sequence(token: str) -> None:
                 # other status code is re-raised as a real failure.
                 body = exc.details.get("body", "")
                 if exc.status == 429 and "birth-date-change-limit-reached" in body:
-                    logger.debug("auth birth date already set (locked), skipping: token={}...", token[:8])
+                    logger.debug("auth birth date already set (locked), skipping: account_key={}", account_log_key(token))
                 else:
                     raise
             await _grpc_call(
@@ -264,17 +260,23 @@ async def nsfw_sequence(token: str) -> None:
                 session=session, lease=lease,
             )
         await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200))
-        logger.debug("auth nsfw sequence completed: token={}...", token[:8])
+        logger.debug("auth nsfw sequence completed: account_key={}", account_log_key(token))
     except UpstreamError as exc:
-        await proxy.feedback(lease, ProxyFeedback(
-            kind=ProxyFeedbackKind.UPSTREAM_5XX if (exc.status or 0) >= 500
-                 else ProxyFeedbackKind.FORBIDDEN,
-            status_code=exc.status or 502,
-        ))
+        await proxy.feedback(lease, _error_feedback(exc))
         raise
     except Exception as exc:
         await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR))
         raise UpstreamError(f"nsfw_sequence: transport error: {exc}") from exc
+
+
+def _error_feedback(exc: UpstreamError) -> ProxyFeedback:
+    """把认证流程的上游异常映射为统一代理反馈。"""
+    return feedback_for_upstream_error(
+        status_code=exc.status,
+        body=str(exc.details.get("body", "")),
+        code=exc.code,
+        reason=exc.code,
+    )
 
 
 __all__ = [

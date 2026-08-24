@@ -3,227 +3,231 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Grok2API - Console 代理池</title>
+  <title>Grok2API - 网络代理池</title>
   <link rel="stylesheet" href="/static/css/app.css?v={{APP_VERSION}}">
   <style>
-    body{background:#f7f4ee;color:#191713}
-    .admin-main{max-width:1360px;padding-top:82px}
-    .proxy-hero{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:18px;align-items:stretch;margin-bottom:18px}
-    .hero-card{position:relative;overflow:hidden;border:1px solid #e8ded0;border-radius:24px;background:linear-gradient(135deg,#fffaf1 0%,#f5efe4 46%,#ece5dc 100%);box-shadow:0 22px 60px rgba(58,45,24,.08);padding:24px}
-    .hero-card:after{content:"";position:absolute;width:260px;height:260px;right:-80px;top:-100px;border-radius:999px;background:radial-gradient(circle,rgba(96,76,42,.12),rgba(96,76,42,0) 70%)}
-    .eyebrow{font-size:12px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:#8f7552;margin-bottom:8px}
-    .title{font-size:32px;line-height:1.05;font-weight:900;letter-spacing:-.04em;margin:0 0 10px}
-    .sub{max-width:760px;color:#6f665a;font-size:14px}
-    .hero-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
-    .btn-dark{background:#1f1b16;color:#fff;border-radius:999px;height:36px;padding:0 16px}
-    .btn-soft{background:#fff9ef;border:1px solid #e6dac8;color:#2b261f;border-radius:999px;height:36px;padding:0 16px}
-    .stats-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-    .stat{border:1px solid #e8ded0;border-radius:18px;background:rgba(255,255,255,.68);padding:14px}
-    .stat-value{font-size:26px;font-weight:900;letter-spacing:-.04em}.stat-label{font-size:12px;color:#7b7166;margin-top:2px}
-    .panel{border:1px solid #e8ded0;background:rgba(255,255,255,.82);box-shadow:0 14px 40px rgba(58,45,24,.06);border-radius:22px;overflow:hidden}
-    .toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px;border-bottom:1px solid #eadfce;flex-wrap:wrap}
-    .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.search,.select{height:36px;border:1px solid #e0d6c7;background:#fff;border-radius:12px;padding:0 12px;font-size:13px}.search{min-width:280px}.chip{display:inline-flex;align-items:center;gap:7px;height:36px;border:1px solid #e0d6c7;background:#fff;border-radius:999px;padding:0 12px;font-size:13px;color:#4b443c}
-    .batch-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;border-bottom:1px solid #eadfce;background:#fbf7ef;flex-wrap:wrap}.batch-selection,.batch-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.selection-summary{font-size:12px;color:#6f665a;margin-right:4px}.selection-summary strong{color:#1f1b16}.batch-btn{height:30px;border:1px solid #ded2c0;background:#fff;border-radius:10px;padding:0 10px;font-size:12px;font-weight:700;color:#403930}.batch-btn:hover:not(:disabled){background:#fff9ef}.batch-btn:disabled{opacity:.42;cursor:not-allowed}.batch-btn.danger{color:#a72b1d;border-color:#e8c8c2}.table-scroll{overflow-x:auto}.select-cell{width:42px;text-align:center;padding-left:12px;padding-right:6px}.row-select{width:16px;height:16px;accent-color:#1f1b16;cursor:pointer}.row-select:disabled{cursor:not-allowed}
-    table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:13px 14px;border-bottom:1px solid #efe5d7;text-align:left;vertical-align:middle}th{font-size:11px;color:#7b7166;text-transform:uppercase;letter-spacing:.08em;background:#fbf7ef}tr:last-child td{border-bottom:0}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.url{font-weight:700;max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.muted{color:#8a8177}.badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:800;border:1px solid transparent}.b-ok{background:#ecfdf3;color:#126b3a;border-color:#c7ecd6}.b-warn{background:#fff7dc;color:#8a5a00;border-color:#f3df9f}.b-bad{background:#fff1f0;color:#a72b1d;border-color:#f3c2bb}.b-cool{background:#eef4ff;color:#2c5c9e;border-color:#cdddf5}.b-off{background:#f2eee8;color:#6f665a;border-color:#ddd2c1}.row-actions{display:flex;gap:6px;flex-wrap:wrap}.icon-btn{height:30px;border:1px solid #e0d6c7;background:#fff;border-radius:10px;padding:0 10px;font-size:12px;font-weight:700}.icon-btn:hover{background:#fff9ef}.danger{color:#a72b1d}.empty{padding:38px;text-align:center;color:#8a8177}.modal-backdrop{position:fixed;inset:0;background:rgba(24,20,16,.42);display:none;place-items:center;z-index:220;padding:20px}.modal-backdrop.open{display:grid}.modal{width:min(620px,100%);border-radius:24px;background:#fffaf3;border:1px solid #eadfce;box-shadow:0 30px 90px rgba(20,16,12,.2);padding:20px}.modal h2{margin:0 0 12px;font-size:22px;letter-spacing:-.03em}.form-grid{display:grid;gap:12px}.field{display:grid;gap:6px}.field label{font-size:12px;font-weight:800;color:#6f665a}.field input,.field select,.field textarea{border:1px solid #e0d6c7;background:#fff;border-radius:12px;padding:10px 12px;font-size:13px}.field textarea{min-height:180px;resize:vertical}.modal-footer{display:flex;justify-content:flex-end;gap:10px;margin-top:16px}.switch{width:42px;height:24px;border-radius:999px;background:#d8cec0;position:relative;transition:.15s}.switch:before{content:"";position:absolute;width:18px;height:18px;top:3px;left:3px;border-radius:999px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.16);transition:.15s}.switch.on{background:#1f1b16}.switch.on:before{transform:translateX(18px)}@media(max-width:980px){.proxy-hero{grid-template-columns:1fr}.search{min-width:100%}.batch-toolbar{align-items:flex-start}.batch-selection,.batch-actions{width:100%}}
+    body{background:#f7f4ee;color:#191713}.admin-main{max-width:1360px;padding-top:82px}
+    .proxy-hero{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:18px;margin-bottom:18px}
+    .card,.panel{border:1px solid #e8ded0;border-radius:24px;background:linear-gradient(135deg,#fffaf1,#f3ede3);box-shadow:0 20px 55px rgba(58,45,24,.07);padding:24px}
+    .eyebrow{font-size:12px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:#8f7552}.title{font-size:32px;font-weight:900;letter-spacing:-.04em;margin:8px 0}.sub,.muted,.hint{color:#756b60;font-size:13px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    .actions,.mode-row,.filters,.batch-side,.row-actions,.probe-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.actions,.mode-row{margin-top:18px}.mode-row label,.field label{font-size:12px;font-weight:800;color:#6f665a}
+    .btn-dark,.btn-soft,.batch-btn,.icon-btn{height:36px;padding:0 14px;border-radius:999px;border:1px solid #e0d6c7;font-weight:700}.btn-dark{background:#1f1b16;color:#fff}.btn-soft,.batch-btn,.icon-btn{background:#fff;color:#342e27}.batch-btn,.icon-btn{height:30px;border-radius:10px;font-size:12px}.danger{color:#a72b1d}.btn-dark:disabled,.btn-soft:disabled,.batch-btn:disabled{opacity:.45;cursor:not-allowed}
+    .select,.search,.field input,.field select,.field textarea{border:1px solid #e0d6c7;background:#fff;border-radius:12px;padding:9px 12px;font-size:13px}.select,.search{height:36px;padding-top:0;padding-bottom:0}.search{min-width:280px}.chip{display:inline-flex;gap:7px;align-items:center;height:36px;border:1px solid #e0d6c7;background:#fff;border-radius:999px;padding:0 12px;font-size:13px}
+    .stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.stat{border:1px solid #e8ded0;border-radius:18px;background:rgba(255,255,255,.72);padding:14px}.stat-value{font-size:25px;font-weight:900}.stat-label{font-size:12px;color:#7b7166}.badge{display:inline-flex;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:800;border:1px solid}.ok{background:#ecfdf3;color:#126b3a;border-color:#c7ecd6}.warn{background:#fff7dc;color:#8a5a00;border-color:#f3df9f}.bad{background:#fff1f0;color:#a72b1d;border-color:#f3c2bb}.cool{background:#eef4ff;color:#2c5c9e;border-color:#cdddf5}.off{background:#f2eee8;color:#6f665a;border-color:#ddd2c1}
+    .resin-card{margin-bottom:18px}.resin-grid{display:block}.resin-input-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center}.resin-input-row input,.resin-input-row .btn-dark{box-sizing:border-box;height:40px}.resin-input-row .btn-dark{white-space:nowrap}.field{display:grid;gap:6px}.field textarea{min-height:180px}.hint{line-height:1.55}.panel{padding:0;overflow:hidden;background:rgba(255,255,255,.82)}.toolbar,.batch-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;border-bottom:1px solid #eadfce;flex-wrap:wrap}.batch-toolbar{background:#fbf7ef}.selection-summary{font-size:12px;color:#6f665a}
+    .table-scroll{overflow-x:auto}table{width:100%;min-width:1120px;border-collapse:collapse;font-size:13px}th,td{padding:13px 14px;border-bottom:1px solid #efe5d7;text-align:left;vertical-align:middle}th{font-size:11px;color:#7b7166;text-transform:uppercase;letter-spacing:.08em;background:#fbf7ef}.select-cell{width:42px;text-align:center}.row-select{width:16px;height:16px;accent-color:#1f1b16}.url{font-weight:700;max-width:350px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.switch{width:42px;height:24px;border:0;border-radius:999px;background:#d8cec0;position:relative}.switch:before{content:"";position:absolute;width:18px;height:18px;top:3px;left:3px;border-radius:50%;background:#fff;transition:.15s}.switch.on{background:#1f1b16}.switch.on:before{transform:translateX(18px)}.empty{text-align:center;padding:36px;color:#8a8177}
+    .modal-backdrop{position:fixed;inset:0;background:rgba(24,20,16,.42);display:none;place-items:center;z-index:220;padding:20px}.modal-backdrop.open{display:grid}.modal{width:min(620px,100%);border-radius:24px;background:#fffaf3;padding:20px}.modal h2{margin-top:0}.form-grid{display:grid;gap:12px}.modal-footer{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}[hidden]{display:none!important}
+    @media(max-width:980px){.proxy-hero{grid-template-columns:1fr}.resin-input-row{grid-template-columns:1fr}.resin-input-row .btn-dark{width:100%}.search{min-width:100%}.batch-side{width:100%}}
   </style>
 </head>
 <body>
 <div id="admin-header" data-active="/admin/proxies"></div>
 <main class="admin-main">
   <section class="proxy-hero">
-    <div class="hero-card">
-      <div class="eyebrow">Console Egress Control</div>
-      <h1 class="title">Console 专用代理池</h1>
-      <p class="sub">仅接管 console.x.ai 请求。按账号 sticky 绑定代理，支持静态代理与 <span class="mono">{time}</span> 动态模板，模型瞬态 429 不会误伤代理。</p>
-      <div class="hero-actions">
-        <button class="btn btn-dark" id="addBtn">新增代理</button>
-        <button class="btn btn-soft" id="importBtn">批量导入</button>
-        <button class="btn btn-soft" id="testAllBtn">测试全部</button>
-        <button class="btn btn-soft" id="clearBindingsBtn">清空绑定</button>
-        <button class="btn btn-soft" id="poolToggleBtn">启用代理池</button>
-        <button class="btn btn-soft" id="fallbackToggleBtn">启用全局回退</button>
-        <a class="btn btn-soft" href="/admin/config?tab=console">配置策略</a>
-      </div>
+    <div class="card">
+      <div class="eyebrow">Unified Egress Control</div><h1 class="title">网络代理池</h1>
+      <p class="sub">Grok、xAI Console、资源、SSE 与 WebSocket 共用唯一出口。Resin 按业务账号渲染稳定的 <span class="mono">{uuid}</span>，出口异常时保持失败关闭。</p>
+      <div class="mode-row"><label for="modeSelect">生效模式</label><select id="modeSelect" class="select"><option value="direct">直连</option><option value="managed_pool">托管代理池</option><option value="resin">Resin</option></select><label class="chip"><input id="skipSslVerify" type="checkbox">跳过代理 TLS 校验</label><button class="btn-dark" id="saveSettingsBtn">保存出口设置</button><button class="btn-soft" id="testEgressBtn">测试当前出口</button></div>
+      <div class="actions"><button class="btn-soft" id="addBtn">新增托管节点</button><button class="btn-soft" id="importBtn">批量导入</button><button class="btn-soft" id="testAllBtn">测试全部节点</button><button class="btn-soft" id="clearBindingsBtn">清空全部绑定</button><a class="btn btn-soft" href="/admin/config?tab=proxy">配置策略</a></div>
     </div>
-    <div class="hero-card">
-      <div class="stats-grid">
-        <div class="stat"><div class="stat-value" id="statTotal">0</div><div class="stat-label">代理总数</div></div>
-        <div class="stat"><div class="stat-value" id="statActive">0</div><div class="stat-label">可调度</div></div>
-        <div class="stat"><div class="stat-value" id="statBindings">0</div><div class="stat-label">账号绑定</div></div>
-        <div class="stat"><div class="stat-value" id="statEnabled">OFF</div><div class="stat-label">代理池开关</div></div>
-      </div>
-      <div class="muted" id="routeSummary" style="margin-top:12px"></div>
-      <div class="muted" id="healthSummary" style="margin-top:6px"></div>
-      <div id="routeAlert" class="badge b-bad" style="display:none;margin-top:8px">Console 池已开启，但没有健康出口，请求将返回 503</div>
-      <div class="muted" id="jobProgress" style="margin-top:6px"></div>
-    </div>
+    <div class="card"><div class="stats"><div class="stat"><div class="stat-value" id="statMode">DIRECT</div><div class="stat-label">当前出口</div></div><div class="stat"><div class="stat-value" id="statTotal">0</div><div class="stat-label">托管节点</div></div><div class="stat"><div class="stat-value" id="statActive">0</div><div class="stat-label">健康节点</div></div><div class="stat"><div class="stat-value" id="statBindings">0</div><div class="stat-label">账号绑定</div></div></div><div class="muted" id="routeSummary" style="margin-top:12px"></div><div class="muted" id="healthSummary" style="margin-top:6px"></div><div id="routeAlert" class="badge warn" style="display:none;margin-top:8px">代理异常时保持失败关闭，不切换其他出口</div><div class="muted" id="jobProgress" style="margin-top:6px"></div></div>
   </section>
-
+  <section class="card resin-card" id="resinCard" hidden>
+    <h2 style="margin-top:0">Resin 正向代理 <span class="badge bad">Fail-closed</span></h2>
+    <div class="resin-grid"><div class="field"><label for="resinUrlTemplate">URL 模板</label><div class="resin-input-row"><input id="resinUrlTemplate" class="mono" placeholder="https://node.{uuid}:TOKEN@HOST:PORT" autocomplete="off"><button class="btn-dark" id="saveResinBtn">保存并启用 Resin</button></div><div class="hint">仅支持 HTTP/HTTPS，且至少包含一个 <span class="mono">{uuid}</span>。重新读取时密码显示为 <span class="mono">***</span>。</div></div></div>
+    <div class="probe-row" style="margin-top:12px"><span id="resinConfigured" class="badge off">尚未配置</span><span id="resinProbe" class="muted">尚未检测</span></div>
+  </section>
   <section class="panel">
-    <div class="toolbar">
-      <div class="filters">
-        <input id="q" class="search" placeholder="搜索 URL、ID、用户名、错误…">
-        <select id="status" class="select"><option value="">全部状态</option><option value="unknown">Unknown</option><option value="healthy">Healthy</option><option value="checking">Checking</option><option value="cooling_down">Cooling</option><option value="dead">Dead</option><option value="disabled">Disabled</option></select>
-        <label class="chip"><input id="onlyDynamic" type="checkbox">只看动态模板</label>
-        <label class="chip"><input id="onlyBad" type="checkbox">只看异常</label>
-      </div>
-      <button class="btn btn-soft" id="refreshBtn">刷新</button>
-    </div>
+    <div class="toolbar"><div class="filters"><input id="q" class="search" placeholder="搜索 URL、ID、用户名、错误…"><select id="status" class="select"><option value="">全部状态</option><option value="unknown">Unknown</option><option value="healthy">Healthy</option><option value="checking">Checking</option><option value="cooling_down">Cooling</option><option value="dead">Dead</option><option value="disabled">Disabled</option></select><label class="chip"><input id="onlyDynamic" type="checkbox">只看动态模板</label><label class="chip"><input id="onlyBad" type="checkbox">只看异常</label></div><button class="btn-soft" id="refreshBtn">刷新</button></div>
     <div class="batch-toolbar">
-      <div class="batch-selection">
-        <span class="selection-summary" id="selectionSummary">当前筛选 <strong>0</strong> 个 / 已选择 <strong>0</strong> 个</span>
-        <button class="batch-btn" id="selectAllBtn">全选当前结果</button>
-        <button class="batch-btn" id="invertSelectionBtn">反选当前结果</button>
-        <button class="batch-btn" id="clearSelectionBtn">取消选择</button>
-      </div>
-      <div class="batch-actions">
-        <button class="batch-btn" id="batchTestBtn">批量测试</button>
-        <button class="batch-btn" id="batchResetBtn">批量重置</button>
-        <button class="batch-btn" id="batchEnableBtn">批量启用</button>
-        <button class="batch-btn" id="batchDisableBtn">批量禁用</button>
-        <button class="batch-btn" id="batchClearBindingsBtn">清理绑定</button>
-        <button class="batch-btn danger" id="batchDeleteBtn">批量删除</button>
-      </div>
+      <div class="batch-side"><span class="selection-summary" id="selectionSummary">当前筛选 <strong>0</strong> 个 / 已选择 <strong>0</strong> 个</span><button class="batch-btn" id="selectAllBtn">全选当前结果</button><button class="batch-btn" id="invertSelectionBtn">反选当前结果</button><button class="batch-btn" id="clearSelectionBtn">取消选择</button></div>
+      <div class="batch-side"><button class="batch-btn" id="batchTestBtn">批量测试</button><button class="batch-btn" id="batchResetBtn">批量重置</button><button class="batch-btn" id="batchEnableBtn">批量启用</button><button class="batch-btn" id="batchDisableBtn">批量禁用</button><button class="batch-btn" id="batchClearBindingsBtn">清理绑定</button><button class="batch-btn danger" id="batchDeleteBtn">批量删除</button></div>
     </div>
-    <div class="table-scroll">
-      <table>
-        <thead><tr><th class="select-cell"><input id="selectAllCheckbox" class="row-select" type="checkbox" aria-label="选择当前筛选结果"></th><th>代理</th><th>模式/状态</th><th>绑定/计数</th><th>最近错误</th><th>下次重试</th><th>启用</th><th>操作</th></tr></thead>
-        <tbody id="rows"></tbody>
-      </table>
-    </div>
-    <div id="empty" class="empty" hidden>暂无匹配代理</div>
+    <div class="table-scroll"><table><thead><tr><th class="select-cell"><input id="selectAllCheckbox" class="row-select" type="checkbox" aria-label="选择当前筛选结果"></th><th>代理</th><th>模式/状态</th><th>绑定/计数</th><th>最近错误</th><th>下次重试</th><th>启用</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div><div id="empty" class="empty" hidden>暂无匹配托管节点</div>
   </section>
 </main>
 
-<div class="modal-backdrop" id="editModal"><div class="modal">
-  <h2 id="editTitle">新增代理</h2>
-  <div class="form-grid">
-    <div class="field"><label>代理 URL</label><input id="formUrl" placeholder="http://user:pass@host:port 或 socks5://host:port"></div>
-    <div class="field"><label>用户名（可选，支持 {time}）</label><input id="formUsername"></div>
-    <div class="field"><label>密码（编辑时留空表示不修改）</label><input id="formPassword" type="password"></div>
-    <div class="field"><label>模式</label><select id="formMode"><option value="">自动推断</option><option value="static">static</option><option value="dynamic_template">dynamic_template</option></select></div>
-  </div>
-  <div class="modal-footer"><button class="btn btn-soft" data-close>取消</button><button class="btn btn-dark" id="saveBtn">保存</button></div>
-</div></div>
-
-<div class="modal-backdrop" id="importModal"><div class="modal">
-  <h2>批量导入代理</h2>
-  <div class="field"><label>每行一个代理 URL</label><textarea id="importText" placeholder="http://Default.{time}:password@host:9200"></textarea></div>
-  <div class="modal-footer"><button class="btn btn-soft" data-close>取消</button><button class="btn btn-dark" id="doImportBtn">导入</button></div>
-</div></div>
+<div class="modal-backdrop" id="editModal"><div class="modal"><h2 id="editTitle">新增托管节点</h2><div class="form-grid"><div class="field"><label>代理 URL</label><input id="formUrl" placeholder="http://user:pass@host:port 或 socks5://host:port"></div><div class="field"><label>用户名（可选，支持 {time}）</label><input id="formUsername"></div><div class="field"><label>密码（编辑时留空表示保持原值）</label><input id="formPassword" type="password"></div><div class="field"><label>模式</label><select id="formMode"><option value="">自动推断</option><option value="static">static</option><option value="dynamic_template">dynamic_template</option></select></div></div><div class="modal-footer"><button class="btn-soft" data-close>取消</button><button class="btn-dark" id="saveBtn">保存</button></div></div></div>
+<div class="modal-backdrop" id="importModal"><div class="modal"><h2>批量导入托管节点</h2><div class="field"><label>每行一个代理 URL</label><textarea id="importText" placeholder="http://Default.{time}:password@host:9200"></textarea></div><div class="modal-footer"><button class="btn-soft" data-close>取消</button><button class="btn-dark" id="doImportBtn">导入</button></div></div></div>
 
 <script src="/static/js/i18n.js?v={{APP_VERSION}}"></script>
 <script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
 <script src="/static/js/admin-header.js?v={{APP_VERSION}}"></script>
 <script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
 <script>
-const state = {
-  items:[], enabled:false, fallback:false, bindingCount:0, statusCounts:{},
-  route:null, activeJob:null, q:'', status:'', onlyDynamic:false, onlyBad:false,
-  editing:null, jobTimer:null, selected:new Set(), batchBusy:false,
-};
-const rowsEl = document.getElementById('rows');
-const emptyEl = document.getElementById('empty');
-const batchActionIds = ['batchTestBtn','batchResetBtn','batchEnableBtn','batchDisableBtn','batchClearBindingsBtn','batchDeleteBtn'];
+const state={items:[],mode:'direct',skipSslVerify:false,resin:{},bindingCount:0,statusCounts:{},route:null,activeJob:null,q:'',status:'',onlyDynamic:false,onlyBad:false,editing:null,jobTimer:null,selected:new Set(),batchBusy:false};
+const rowsEl=document.getElementById('rows');
+const emptyEl=document.getElementById('empty');
+const batchActionIds=['batchTestBtn','batchResetBtn','batchEnableBtn','batchDisableBtn','batchClearBindingsBtn','batchDeleteBtn'];
 
-async function key(){ return await adminKey.get(); }
-async function api(method,path,body){ const k=await key(); const res=await fetch('/admin/api'+path,{method,headers:{Authorization:`Bearer ${k}`,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined}); const text=await res.text(); let data={}; try{data=text?JSON.parse(text):{};}catch{data={message:text}} if(!res.ok){throw new Error(data?.error?.message||data?.detail||data?.message||text||res.statusText)} return data; }
-function esc(v){return String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
-function badge(status,checking){ const map={unknown:['Unknown','b-warn'],healthy:['Healthy','b-ok'],cooling_down:['Cooling','b-cool'],dead:['Dead','b-bad'],disabled:['Disabled','b-off']}; const [t,c]=map[status]||[status,'b-warn']; return `<span class="badge ${c}">${esc(t)}</span>${checking?' <span class="badge b-cool">Checking</span>':''}`; }
-function time(v){ if(!v) return '<span class="muted">-</span>'; return new Date(v).toLocaleString(); }
+/** 读取后台密钥。 */
+async function key(){return await adminKey.get();}
 
-function filtered(){ const q=state.q.toLowerCase().trim(); return state.items.filter(p=>{ if(state.status==='checking'&&!p.checking)return false; if(state.status&&state.status!=='checking'&&p.status!==state.status)return false; if(state.onlyDynamic&&p.mode!=='dynamic_template')return false; if(state.onlyBad&&!['unknown','dead','cooling_down','disabled'].includes(p.status))return false; if(!q)return true; return [p.id,p.url,p.raw_url,p.username,p.last_error,p.mode,p.status].join(' ').toLowerCase().includes(q); }); }
+/** 调用管理 API 并统一解析错误。 */
+async function api(method,path,body){
+  const k=await key();
+  const response=await fetch('/admin/api'+path,{method,headers:{Authorization:`Bearer ${k}`,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  const text=await response.text();let data={};
+  try{data=text?JSON.parse(text):{};}catch{data={message:text};}
+  if(!response.ok)throw new Error(data?.error?.message||data?.detail||data?.message||text||response.statusText);
+  return data;
+}
 
-function renderStats(){ const active=state.items.filter(p=>p.status==='healthy'&&p.enabled).length; const c=state.statusCounts; const alert=document.getElementById('routeAlert'); document.getElementById('statTotal').textContent=state.items.length; document.getElementById('statActive').textContent=active; document.getElementById('statBindings').textContent=state.bindingCount; document.getElementById('statEnabled').textContent=state.enabled?'ON':'OFF'; document.getElementById('poolToggleBtn').textContent=state.enabled?'关闭代理池':'启用代理池'; document.getElementById('fallbackToggleBtn').textContent=state.fallback?'关闭全局回退':'启用全局回退'; document.getElementById('routeSummary').textContent=state.route?.summary||''; document.getElementById('healthSummary').textContent=`Unknown ${c.unknown||0} · Healthy ${c.healthy||0} · Checking ${c.checking||0} · Cooling ${c.cooling_down||0} · Dead ${c.dead||0} · Disabled ${c.disabled||0}`; alert.textContent=state.enabled?'Console 池已开启，但没有健康出口，请求将返回 503':'全局代理配置无效，请求将返回 503'; alert.style.display=state.route?.fail_closed?'inline-flex':'none'; }
+/** 捕获界面动作错误并显示中文提示。 */
+async function runUiAction(label,action){try{return await action();}catch(error){showToast(`${label}：${error.message}`,'error');}}
 
-/** 同步批量工具栏、表头复选框和按钮状态。 */
+/** 转义表格文本。 */
+function esc(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
+
+/** 渲染节点状态徽标。 */
+function badge(status,checking){const map={unknown:['Unknown','warn'],healthy:['Healthy','ok'],cooling_down:['Cooling','cool'],dead:['Dead','bad'],disabled:['Disabled','off']};const [text,klass]=map[status]||[status,'warn'];return `<span class="badge ${klass}">${esc(text)}</span>${checking?' <span class="badge cool">Checking</span>':''}`;}
+
+/** 格式化时间。 */
+function formatTime(value){return value?new Date(value).toLocaleString():'-';}
+
+/** 返回搜索和全部筛选条件共同作用后的节点。 */
+function filtered(){const query=state.q.toLowerCase().trim();return state.items.filter(item=>{if(state.status==='checking'&&!item.checking)return false;if(state.status&&state.status!=='checking'&&item.status!==state.status)return false;if(state.onlyDynamic&&item.mode!=='dynamic_template')return false;if(state.onlyBad&&!['unknown','dead','cooling_down','disabled'].includes(item.status))return false;if(!query)return true;return [item.id,item.url,item.raw_url,item.username,item.last_error,item.mode,item.status].join(' ').toLowerCase().includes(query);});}
+
+/** 渲染统一出口、健康状态和 Resin 探测结果。 */
+function renderStats(){
+  const active=state.items.filter(item=>item.status==='healthy'&&item.enabled).length;
+  const counts=state.statusCounts;
+  document.getElementById('statMode').textContent=({direct:'直连',managed_pool:'托管池',resin:'RESIN'})[state.mode]||state.mode;
+  document.getElementById('statTotal').textContent=state.items.length;document.getElementById('statActive').textContent=active;document.getElementById('statBindings').textContent=state.bindingCount;
+  document.getElementById('routeSummary').textContent=state.route?.summary||'';
+  document.getElementById('healthSummary').textContent=`Unknown ${counts.unknown||0} · Healthy ${counts.healthy||0} · Checking ${counts.checking||0} · Cooling ${counts.cooling_down||0} · Dead ${counts.dead||0} · Disabled ${counts.disabled||0}`;
+  const routeAlert=document.getElementById('routeAlert');routeAlert.style.display=state.route?.fail_closed?'inline-flex':'none';routeAlert.textContent=state.route?.available===false?'当前出口不可用，请求将保持失败关闭':'代理异常时保持失败关闭，不切换其他出口';routeAlert.className=`badge ${state.route?.available===false?'bad':'warn'}`;routeAlert.style.marginTop='8px';
+  document.getElementById('modeSelect').value=state.mode;document.getElementById('skipSslVerify').checked=state.skipSslVerify;document.getElementById('resinCard').hidden=state.mode!=='resin';
+  const configured=document.getElementById('resinConfigured');configured.textContent=state.resin.configured?'模板已配置':'尚未配置';configured.className=`badge ${state.resin.configured?'ok':'off'}`;
+  const probe=state.resin.last_probe||{};const probeDetail=probe.status_code?`HTTP ${probe.status_code}`:(probe.error||'');document.getElementById('resinProbe').textContent=probe.checked_at?`最近检测：${probe.ok?'通过':'异常'} · ${probe.latency_ms??'-'}ms${probeDetail?` · ${probeDetail}`:''} · ${formatTime(probe.checked_at)}`:'尚未检测';
+}
+
+/** 同步批量工具栏和表头复选框三态。 */
 function renderBatch(items=filtered()){
-  const selectedInFilter=items.filter(item=>state.selected.has(item.id)).length;
-  const allCheckbox=document.getElementById('selectAllCheckbox');
-  allCheckbox.checked=items.length>0&&selectedInFilter===items.length;
-  allCheckbox.indeterminate=selectedInFilter>0&&selectedInFilter<items.length;
-  allCheckbox.disabled=state.batchBusy||items.length===0;
+  const selectedInFilter=items.filter(item=>state.selected.has(item.id)).length;const all=document.getElementById('selectAllCheckbox');
+  all.checked=items.length>0&&selectedInFilter===items.length;all.indeterminate=selectedInFilter>0&&selectedInFilter<items.length;all.disabled=state.batchBusy||items.length===0;
   document.getElementById('selectionSummary').innerHTML=`当前筛选 <strong>${items.length}</strong> 个 / 已选择 <strong>${state.selected.size}</strong> 个`;
-  document.getElementById('selectAllBtn').disabled=state.batchBusy||items.length===0;
-  document.getElementById('invertSelectionBtn').disabled=state.batchBusy||items.length===0;
-  document.getElementById('clearSelectionBtn').disabled=state.batchBusy||state.selected.size===0;
+  document.getElementById('selectAllBtn').disabled=state.batchBusy||items.length===0;document.getElementById('invertSelectionBtn').disabled=state.batchBusy||items.length===0;document.getElementById('clearSelectionBtn').disabled=state.batchBusy||state.selected.size===0;
   batchActionIds.forEach(id=>{document.getElementById(id).disabled=state.batchBusy||state.selected.size===0;});
 }
 
-function render(){ renderStats(); const items=filtered(); rowsEl.innerHTML=items.map(p=>`<tr>
-<td class="select-cell"><input class="row-select" type="checkbox" data-select="${esc(p.id)}" aria-label="选择代理 ${esc(p.id)}" ${state.selected.has(p.id)?'checked':''} ${state.batchBusy?'disabled':''}></td>
-<td><div class="url" title="${esc(p.raw_url||p.url)}">${esc(p.url)}</div><div class="muted mono">${esc(p.id.slice(0,12))} · gen ${p.generation} · epoch ${p.runtime_epoch}</div></td>
-<td>${badge(p.status,p.checking)} <span class="badge ${p.mode==='dynamic_template'?'b-cool':'b-off'}">${esc(p.mode)}</span></td>
-<td><div>绑定 <b>${p.bound_account_count}</b></div><div class="muted">成功 ${p.success_count} / 失败 ${p.failure_count}</div></td>
-<td><div class="muted" title="${esc(p.last_error)}">${esc(p.last_error||'-')}</div><div class="muted">${p.last_failure_at?time(p.last_failure_at):''}</div><div class="muted">检测 ${p.last_checked_at?time(p.last_checked_at):'-'}${p.last_latency_ms!=null?` · ${p.last_latency_ms}ms`:''}</div></td>
-<td>${time(p.next_retry_at)}</td>
-<td><button class="switch ${p.enabled?'on':''}" data-enable="${esc(p.id)}" title="启用/禁用"></button></td>
-<td><div class="row-actions"><button class="icon-btn" data-edit="${esc(p.id)}">编辑</button><button class="icon-btn" data-test="${esc(p.id)}">测试</button><button class="icon-btn" data-reset="${esc(p.id)}">重置</button><button class="icon-btn danger" data-del="${esc(p.id)}">删除</button></div></td>
-</tr>`).join(''); emptyEl.hidden=items.length>0; bindRows(); renderBatch(items); }
+/** 渲染托管池表格。 */
+function render(){
+  renderStats();const items=filtered();
+  rowsEl.innerHTML=items.map(item=>`<tr>
+    <td class="select-cell"><input class="row-select" type="checkbox" data-select="${esc(item.id)}" ${state.selected.has(item.id)?'checked':''} ${state.batchBusy?'disabled':''}></td>
+    <td><div class="url" title="${esc(item.raw_url||item.url)}">${esc(item.url)}</div><div class="muted mono">${esc(item.id.slice(0,12))} · gen ${item.generation} · epoch ${item.runtime_epoch}</div></td>
+    <td>${badge(item.status,item.checking)} <span class="badge ${item.mode==='dynamic_template'?'cool':'off'}">${esc(item.mode)}</span></td>
+    <td><div>绑定 <b>${item.bound_account_count}</b></div><div class="muted">成功 ${item.success_count} / 失败 ${item.failure_count}</div></td>
+    <td><div class="muted" title="${esc(item.last_error)}">${esc(item.last_error||'-')}</div><div class="muted">检测 ${formatTime(item.last_checked_at)}${item.last_latency_ms!=null?` · ${item.last_latency_ms}ms`:''}</div></td>
+    <td>${formatTime(item.next_retry_at)}</td><td><button class="switch ${item.enabled?'on':''}" data-enable="${esc(item.id)}" title="启用/禁用"></button></td>
+    <td><div class="row-actions"><button class="icon-btn" data-edit="${esc(item.id)}">编辑</button><button class="icon-btn" data-test="${esc(item.id)}">测试</button><button class="icon-btn" data-reset="${esc(item.id)}">重置</button><button class="icon-btn danger" data-del="${esc(item.id)}">删除</button></div></td>
+  </tr>`).join('');
+  emptyEl.hidden=items.length>0;bindRows();renderBatch(items);
+}
 
-function bindRows(){ rowsEl.querySelectorAll('[data-select]').forEach(b=>b.onchange=()=>toggleRowSelection(b.dataset.select,b.checked)); rowsEl.querySelectorAll('[data-enable]').forEach(b=>b.onclick=()=>toggleEnable(b.dataset.enable)); rowsEl.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEdit(b.dataset.edit)); rowsEl.querySelectorAll('[data-test]').forEach(b=>b.onclick=()=>testProxy(b.dataset.test)); rowsEl.querySelectorAll('[data-reset]').forEach(b=>b.onclick=()=>resetProxy(b.dataset.reset)); rowsEl.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>deleteProxy(b.dataset.del)); }
+/** 绑定当前表格行操作。 */
+function bindRows(){
+  rowsEl.querySelectorAll('[data-select]').forEach(element=>element.onchange=()=>toggleRowSelection(element.dataset.select,element.checked));
+  rowsEl.querySelectorAll('[data-enable]').forEach(element=>element.onclick=()=>runUiAction('节点启停失败',()=>toggleEnable(element.dataset.enable)));
+  rowsEl.querySelectorAll('[data-edit]').forEach(element=>element.onclick=()=>openEdit(element.dataset.edit));
+  rowsEl.querySelectorAll('[data-test]').forEach(element=>element.onclick=()=>runUiAction('节点测试失败',()=>testProxy(element.dataset.test)));
+  rowsEl.querySelectorAll('[data-reset]').forEach(element=>element.onclick=()=>runUiAction('节点重置失败',()=>resetProxy(element.dataset.reset)));
+  rowsEl.querySelectorAll('[data-del]').forEach(element=>element.onclick=()=>runUiAction('节点删除失败',()=>deleteProxy(element.dataset.del)));
+}
 
-function reconcileSelection(){ const existing=new Set(state.items.map(item=>item.id)); [...state.selected].forEach(id=>{if(!existing.has(id))state.selected.delete(id);}); }
-function toggleRowSelection(id,checked){ if(checked)state.selected.add(id);else state.selected.delete(id); renderBatch(); }
-function selectAllCurrent(){ filtered().forEach(item=>state.selected.add(item.id)); render(); }
-function invertCurrent(){ filtered().forEach(item=>state.selected.has(item.id)?state.selected.delete(item.id):state.selected.add(item.id)); render(); }
-function clearSelection(){ state.selected.clear(); render(); }
-function toggleAllCurrent(checked){ filtered().forEach(item=>checked?state.selected.add(item.id):state.selected.delete(item.id)); render(); }
-function changeFilter(update){ update(); state.selected.clear(); render(); }
+/** 刷新服务端快照并剔除已经删除的选择项。 */
+async function load(){
+  const data=await api('GET','/proxies');state.items=data.items||[];state.mode=data.mode||'direct';state.skipSslVerify=!!data.skip_ssl_verify;state.resin=data.resin||{};state.bindingCount=data.binding_count||0;state.statusCounts=data.status_counts||{};state.route=data.route||null;state.activeJob=data.active_job||null;
+  const existing=new Set(state.items.map(item=>item.id));[...state.selected].forEach(id=>{if(!existing.has(id))state.selected.delete(id);});
+  document.getElementById('resinUrlTemplate').value=state.resin.url_template||'';render();if(state.activeJob)watchJob(state.activeJob.job_id);
+}
 
-async function load(){ const data=await api('GET','/proxies'); state.items=data.items||[]; state.enabled=!!data.enabled; state.fallback=!!data.fallback_to_global_proxy; state.bindingCount=data.binding_count||0; state.statusCounts=data.status_counts||{}; state.route=data.route||null; state.activeJob=data.active_job||null; reconcileSelection(); render(); if(state.activeJob)watchJob(state.activeJob.job_id); }
-function openModal(id){document.getElementById(id).classList.add('open')} function closeModals(){document.querySelectorAll('.modal-backdrop').forEach(m=>m.classList.remove('open'))}
-function openEdit(id){ state.editing=id||null; const item=state.items.find(p=>p.id===id); document.getElementById('editTitle').textContent=item?'编辑代理':'新增代理'; document.getElementById('formUrl').value=item?.raw_url||''; document.getElementById('formUsername').value=item?.username||''; document.getElementById('formPassword').value=''; document.getElementById('formMode').value=item?.mode||''; openModal('editModal'); }
-async function save(){ const body={url:formUrl.value.trim(),username:formUsername.value.trim(),password:formPassword.value,mode:formMode.value||null}; if(!body.url){showToast('请填写代理 URL','error');return;} if(state.editing){ await api('PUT','/proxies/'+state.editing,body); showToast('代理已更新','success'); } else { await api('POST','/proxies',body); showToast('代理已新增','success'); } closeModals(); await load(); }
-async function doImport(){ const r=await api('POST','/proxies/import',{text:importText.value}); showToast(`导入完成：新增 ${r.imported}，更新 ${r.updated}，跳过 ${r.skipped}`,'success'); closeModals(); importText.value=''; await load(); }
-async function toggleEnable(id){ const item=state.items.find(p=>p.id===id); await api('POST',`/proxies/${id}/enabled`,{enabled:!item.enabled}); await load(); }
-async function resetProxy(id){ const r=await api('POST',`/proxies/${id}/reset`); showToast('运行态已重置，已创建检测任务','success'); await load(); watchJob(r.job_id); }
-async function testProxy(id){ showToast('正在测试代理…','info'); const r=await api('POST',`/proxies/${id}/test`); const label=r.outcome==='healthy'?'测试通过':r.outcome==='inconclusive'?'结果不确定':'测试失败'; const tone=r.outcome==='healthy'?'success':r.outcome==='inconclusive'?'info':'error'; showToast(`${label}：${r.message} (${r.latency_ms}ms)`,tone); await load(); }
-async function testAll(){ showToast('已创建全量检测任务','info'); const r=await api('POST','/proxies/test-all'); watchJob(r.job_id); }
-async function togglePool(){ const r=await api('PATCH','/proxies/settings',{enabled:!state.enabled}); if(r.fallback_auto_disabled){showToast('Console 代理池已开启；因未配置有效全局代理，回退已自动关闭','info');}else{showToast(r.enabled?'Console 代理池已开启':'Console 代理池已关闭','success');} await load(); if(r.job_id)watchJob(r.job_id); }
-async function toggleFallback(){ const r=await api('PATCH','/proxies/settings',{fallback_to_global_proxy:!state.fallback}); if(r.fallback_auto_disabled){showToast('未配置有效的全局代理，Console 全局回退保持关闭','info');}else{showToast(r.fallback_to_global_proxy?'已启用全局代理回退':'已关闭全局代理回退','success');} await load(); }
-async function watchJob(id){ if(!id)return; clearTimeout(state.jobTimer); try{ const j=await api('GET',`/proxies/test-jobs/${id}`); document.getElementById('jobProgress').textContent=`检测任务 ${j.completed}/${j.total} · 健康 ${j.healthy} · 异常 ${j.unhealthy} · 不确定 ${j.inconclusive} · 跳过 ${j.skipped}`; if(['queued','running'].includes(j.status)){state.jobTimer=setTimeout(()=>watchJob(id),1500)}else{showToast(`检测任务${j.status==='completed'?'完成':'结束'}：健康 ${j.healthy}，异常 ${j.unhealthy}`,j.unhealthy?'error':'success'); await load();} }catch(e){document.getElementById('jobProgress').textContent=`检测任务读取失败：${e.message}`;} }
-async function deleteProxy(id){ if(!confirm('确认删除该代理？相关账号绑定会被清理。'))return; await api('DELETE','/proxies/'+id); showToast('代理已删除','success'); await load(); }
-async function clearBindings(){ if(!confirm('确认清空所有 Console 代理 sticky 绑定？'))return; const r=await api('DELETE','/proxies/bindings'); showToast(`已清空 ${r.cleared} 个绑定`,'success'); await load(); }
-
-/** 执行一次批量请求，并在成功后统一刷新和接管健康任务进度。 */
-async function runBatch(path,extra,message){
-  const proxyIds=[...state.selected];
-  if(!proxyIds.length||state.batchBusy)return;
-  state.batchBusy=true;
-  render();
-  let result;
-  try{
-    result=await api('POST',path,{proxy_ids:proxyIds,...extra});
-  }catch(e){
-    state.batchBusy=false;
-    render();
-    showToast(`批量操作失败：${e.message}`,'error');
-    return;
-  }
-  state.selected.clear();
-  state.batchBusy=false;
-  showToast(message(result),result.reset!=null&&result.reset<result.selected?'info':'success');
+/** 保存当前唯一出口模式和 Resin 模板。 */
+async function saveSettings(forceResin=false){
+  const mode=forceResin?'resin':document.getElementById('modeSelect').value;
+  const body={mode,skip_ssl_verify:document.getElementById('skipSslVerify').checked};
+  if(mode==='resin')body.resin_url_template=document.getElementById('resinUrlTemplate').value.trim();
+  const result=await api('PATCH','/proxies/settings',body);
+  state.mode=result.mode;
+  state.skipSslVerify=!!result.skip_ssl_verify;
+  state.resin={...state.resin,configured:!!result.resin_configured,url_template:result.resin_url_template||''};
+  document.getElementById('resinUrlTemplate').value=state.resin.url_template;
+  renderStats();
+  showToast(`出口模式已切换为 ${result.mode}`,'success');
   try{
     await load();
-  }catch(e){
-    showToast(`批量操作已完成，刷新快照失败：${e.message}`,'error');
-    return;
+  }catch(error){
+    console.error(error);
+    showToast(`出口设置已保存，代理快照刷新失败：${error.message}`,'error');
   }
   if(result.job_id)watchJob(result.job_id);
 }
 
-function batchTest(){ return runBatch('/proxies/batch/test',{},r=>`已为 ${r.selected} 个代理创建检测任务`); }
-function batchReset(){ const n=state.selected.size; if(!n||!confirm(`确认重置选中的 ${n} 个代理？相关账号绑定会被清理。`))return; return runBatch('/proxies/batch/reset',{},r=>`已重置 ${r.reset}/${r.selected} 个代理并创建检测任务`); }
-function batchEnable(){ return runBatch('/proxies/batch/enabled',{enabled:true},r=>`已启用 ${r.changed} 个代理，${r.unchanged} 个无需变更`); }
-function batchDisable(){ const n=state.selected.size; if(!n||!confirm(`确认禁用选中的 ${n} 个代理？相关账号绑定会被清理。`))return; return runBatch('/proxies/batch/enabled',{enabled:false},r=>`已禁用 ${r.changed} 个代理，${r.unchanged} 个无需变更`); }
-function batchClearBindings(){ const n=state.selected.size; if(!n||!confirm(`确认清理选中 ${n} 个代理的账号 sticky 绑定？`))return; return runBatch('/proxies/batch/clear-bindings',{},r=>`已清理 ${r.cleared} 个账号绑定`); }
-function batchDelete(){ const n=state.selected.size; if(!n||!confirm(`确认删除选中的 ${n} 个代理？该操作会清理相关运行态和账号绑定。`))return; return runBatch('/proxies/batch/delete',{},r=>`已删除 ${r.deleted} 个代理`); }
+/** 创建当前有效出口检测任务。 */
+async function testEgress(){const result=await api('POST','/proxies/test-egress');showToast('已创建当前出口检测任务','info');watchJob(result.job_id);}
 
-document.getElementById('addBtn').onclick=()=>openEdit(null); document.getElementById('importBtn').onclick=()=>openModal('importModal'); document.getElementById('testAllBtn').onclick=testAll; document.getElementById('poolToggleBtn').onclick=togglePool; document.getElementById('fallbackToggleBtn').onclick=toggleFallback; document.getElementById('saveBtn').onclick=save; document.getElementById('doImportBtn').onclick=doImport; document.getElementById('refreshBtn').onclick=load; document.getElementById('clearBindingsBtn').onclick=clearBindings; document.querySelectorAll('[data-close]').forEach(b=>b.onclick=closeModals); document.querySelectorAll('.modal-backdrop').forEach(m=>m.onclick=e=>{if(e.target===m)closeModals()});
-document.getElementById('selectAllCheckbox').onchange=e=>toggleAllCurrent(e.target.checked); document.getElementById('selectAllBtn').onclick=selectAllCurrent; document.getElementById('invertSelectionBtn').onclick=invertCurrent; document.getElementById('clearSelectionBtn').onclick=clearSelection; document.getElementById('batchTestBtn').onclick=batchTest; document.getElementById('batchResetBtn').onclick=batchReset; document.getElementById('batchEnableBtn').onclick=batchEnable; document.getElementById('batchDisableBtn').onclick=batchDisable; document.getElementById('batchClearBindingsBtn').onclick=batchClearBindings; document.getElementById('batchDeleteBtn').onclick=batchDelete;
-document.getElementById('q').oninput=e=>changeFilter(()=>{state.q=e.target.value}); document.getElementById('status').onchange=e=>changeFilter(()=>{state.status=e.target.value}); document.getElementById('onlyDynamic').onchange=e=>changeFilter(()=>{state.onlyDynamic=e.target.checked}); document.getElementById('onlyBad').onchange=e=>changeFilter(()=>{state.onlyBad=e.target.checked});
-(async()=>{ await renderAdminHeader?.(); const k=await key(); if(!k||!await verifyKey('/admin/api/verify',k).catch(()=>false)){location.href='/admin/login';return;} await load(); })().catch(e=>{console.error(e);showToast(`代理池加载失败：${e.message}`,'error')});
+/** 打开或关闭编辑弹窗。 */
+function openModal(id){document.getElementById(id).classList.add('open');}
+function closeModals(){document.querySelectorAll('.modal-backdrop').forEach(modal=>modal.classList.remove('open'));}
+
+/** 打开节点编辑弹窗。 */
+function openEdit(id){state.editing=id||null;const item=state.items.find(proxy=>proxy.id===id);document.getElementById('editTitle').textContent=item?'编辑托管节点':'新增托管节点';document.getElementById('formUrl').value=item?.raw_url||'';document.getElementById('formUsername').value=item?.username||'';document.getElementById('formPassword').value='';document.getElementById('formMode').value=item?.mode||'';openModal('editModal');}
+
+/** 新增或更新托管节点。 */
+async function save(){const body={url:formUrl.value.trim(),username:formUsername.value.trim(),password:formPassword.value,mode:formMode.value||null};if(!body.url){showToast('请填写代理 URL','error');return;}if(state.editing){await api('PUT','/proxies/'+state.editing,body);showToast('节点已更新','success');}else{await api('POST','/proxies',body);showToast('节点已新增','success');}closeModals();await load();}
+
+/** 批量导入托管节点。 */
+async function doImport(){const result=await api('POST','/proxies/import',{text:importText.value});showToast(`导入完成：新增 ${result.imported}，更新 ${result.updated}，跳过 ${result.skipped}`,'success');closeModals();importText.value='';await load();if(result.job_id)watchJob(result.job_id);}
+
+/** 执行单节点操作。 */
+async function toggleEnable(id){const item=state.items.find(proxy=>proxy.id===id);const result=await api('POST',`/proxies/${id}/enabled`,{enabled:!item.enabled});await load();if(result.job_id)watchJob(result.job_id);}
+async function resetProxy(id){const result=await api('POST',`/proxies/${id}/reset`);showToast('运行态已重置，已创建检测任务','success');await load();watchJob(result.job_id);}
+async function testProxy(id){showToast('正在测试节点…','info');const result=await api('POST',`/proxies/${id}/test`);const label=result.outcome==='healthy'?'测试通过':result.outcome==='inconclusive'?'结果不确定':'测试失败';showToast(`${label}：${result.message} (${result.latency_ms}ms)`,result.outcome==='healthy'?'success':result.outcome==='inconclusive'?'info':'error');await load();}
+async function testAll(){const result=await api('POST','/proxies/test-all');showToast('已创建全量节点检测任务','info');watchJob(result.job_id);}
+async function deleteProxy(id){if(!confirm('确认删除该节点？相关账号绑定会被清理。'))return;await api('DELETE','/proxies/'+id);showToast('节点已删除','success');await load();}
+async function clearBindings(){if(!confirm('确认清空全部托管节点的账号粘性绑定？'))return;const result=await api('DELETE','/proxies/bindings');showToast(`已清空 ${result.cleared} 个绑定`,'success');await load();}
+
+/** 轮询节点共享任务或当前出口任务。 */
+async function watchJob(id){
+  if(!id)return;clearTimeout(state.jobTimer);
+  try{const job=await api('GET',`/proxies/test-jobs/${id}`);document.getElementById('jobProgress').textContent=`检测任务 ${job.completed}/${job.total} · 健康 ${job.healthy} · 异常 ${job.unhealthy} · 不确定 ${job.inconclusive} · 跳过 ${job.skipped}`;
+    if(['pending','queued','running'].includes(job.status)){state.jobTimer=setTimeout(()=>watchJob(id),1500);}else{showToast(`检测任务完成：健康 ${job.healthy}，异常 ${job.unhealthy}`,job.unhealthy?'error':'success');await load();}
+  }catch(error){document.getElementById('jobProgress').textContent=`检测任务读取失败：${error.message}`;}
+}
+
+/** 执行批量请求；失败时保留选择，成功时清空并刷新。 */
+async function runBatch(path,extra,message){
+  const proxyIds=[...state.selected];if(!proxyIds.length||state.batchBusy)return;state.batchBusy=true;render();let result;
+  try{result=await api('POST',path,{proxy_ids:proxyIds,...extra});}catch(error){state.batchBusy=false;render();showToast(`批量操作失败：${error.message}`,'error');return;}
+  state.selected.clear();state.batchBusy=false;showToast(message(result),'success');await load();if(result.job_id)watchJob(result.job_id);
+}
+
+/** 修改当前选择集合。 */
+function toggleRowSelection(id,checked){if(checked)state.selected.add(id);else state.selected.delete(id);renderBatch();}
+function selectAllCurrent(){filtered().forEach(item=>state.selected.add(item.id));render();}
+function invertCurrent(){filtered().forEach(item=>state.selected.has(item.id)?state.selected.delete(item.id):state.selected.add(item.id));render();}
+function clearSelection(){state.selected.clear();render();}
+function toggleAllCurrent(checked){filtered().forEach(item=>checked?state.selected.add(item.id):state.selected.delete(item.id));render();}
+function changeFilter(update){update();state.selected.clear();render();}
+
+/** 包装批量动作和确认路径。 */
+function batchTest(){return runBatch('/proxies/batch/test',{},result=>`已为 ${result.selected} 个节点创建检测任务`);}
+function batchReset(){const count=state.selected.size;if(!count||!confirm(`确认重置选中的 ${count} 个节点？相关绑定会被清理。`))return;return runBatch('/proxies/batch/reset',{},result=>`已重置 ${result.reset}/${result.selected} 个节点`);}
+function batchEnable(){return runBatch('/proxies/batch/enabled',{enabled:true},result=>`已启用 ${result.changed} 个节点，${result.unchanged} 个无需变更`);}
+function batchDisable(){const count=state.selected.size;if(!count||!confirm(`确认禁用选中的 ${count} 个节点？相关绑定会被清理。`))return;return runBatch('/proxies/batch/enabled',{enabled:false},result=>`已禁用 ${result.changed} 个节点，${result.unchanged} 个无需变更`);}
+function batchClearBindings(){const count=state.selected.size;if(!count||!confirm(`确认清理选中 ${count} 个节点的账号粘性绑定？`))return;return runBatch('/proxies/batch/clear-bindings',{},result=>`已清理 ${result.cleared} 个账号绑定`);}
+function batchDelete(){const count=state.selected.size;if(!count||!confirm(`确认删除选中的 ${count} 个节点？`))return;return runBatch('/proxies/batch/delete',{},result=>`已删除 ${result.deleted} 个节点`);}
+
+document.getElementById('modeSelect').onchange=event=>{document.getElementById('resinCard').hidden=event.target.value!=='resin';};
+document.getElementById('saveSettingsBtn').onclick=()=>runUiAction('出口设置保存失败',()=>saveSettings(false));document.getElementById('saveResinBtn').onclick=()=>runUiAction('Resin 设置保存失败',()=>saveSettings(true));document.getElementById('testEgressBtn').onclick=()=>runUiAction('出口测试创建失败',testEgress);
+document.getElementById('addBtn').onclick=()=>openEdit(null);document.getElementById('importBtn').onclick=()=>openModal('importModal');document.getElementById('testAllBtn').onclick=()=>runUiAction('全量测试创建失败',testAll);document.getElementById('saveBtn').onclick=()=>runUiAction('节点保存失败',save);document.getElementById('doImportBtn').onclick=()=>runUiAction('批量导入失败',doImport);document.getElementById('refreshBtn').onclick=()=>runUiAction('代理池刷新失败',load);document.getElementById('clearBindingsBtn').onclick=()=>runUiAction('绑定清理失败',clearBindings);
+document.querySelectorAll('[data-close]').forEach(button=>button.onclick=closeModals);document.querySelectorAll('.modal-backdrop').forEach(modal=>modal.onclick=event=>{if(event.target===modal)closeModals();});
+document.getElementById('selectAllCheckbox').onchange=event=>toggleAllCurrent(event.target.checked);document.getElementById('selectAllBtn').onclick=selectAllCurrent;document.getElementById('invertSelectionBtn').onclick=invertCurrent;document.getElementById('clearSelectionBtn').onclick=clearSelection;
+document.getElementById('batchTestBtn').onclick=batchTest;document.getElementById('batchResetBtn').onclick=batchReset;document.getElementById('batchEnableBtn').onclick=batchEnable;document.getElementById('batchDisableBtn').onclick=batchDisable;document.getElementById('batchClearBindingsBtn').onclick=batchClearBindings;document.getElementById('batchDeleteBtn').onclick=batchDelete;
+document.getElementById('q').oninput=event=>changeFilter(()=>{state.q=event.target.value;});document.getElementById('status').onchange=event=>changeFilter(()=>{state.status=event.target.value;});document.getElementById('onlyDynamic').onchange=event=>changeFilter(()=>{state.onlyDynamic=event.target.checked;});document.getElementById('onlyBad').onchange=event=>changeFilter(()=>{state.onlyBad=event.target.checked;});
+
+(async()=>{await renderAdminHeader?.();const k=await key();if(!k||!await verifyKey('/admin/api/verify',k).catch(()=>false)){location.href='/admin/login';return;}await load();})().catch(error=>{console.error(error);showToast(`代理池加载失败：${error.message}`,'error');});
 </script>
 </body>
 </html>

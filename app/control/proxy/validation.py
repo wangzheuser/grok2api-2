@@ -8,13 +8,10 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
-SUPPORTED_PROXY_SCHEMES = frozenset(
-    {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
-)
-SUPPORTED_EGRESS_MODES = frozenset({"direct", "single_proxy", "proxy_pool"})
-SUPPORTED_ROTATION_STRATEGIES = frozenset(
-    {"sticky_failover", "round_robin", "random"}
-)
+SUPPORTED_UNIFIED_EGRESS_MODES = frozenset({"direct", "managed_pool", "resin"})
+RESIN_UUID_PLACEHOLDER = "{uuid}"
+_PLACEHOLDER_RE = re.compile(r"\{[^{}]+\}")
+_VALIDATION_UUID = "00000000-0000-5000-8000-000000000000"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,197 +28,150 @@ class ProxyConfigIssue(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class ValidatedEgressConfig:
-    """运行时可直接装载的全局出口代理配置。"""
+class ValidatedUnifiedProxyConfig:
+    """统一出口运行时配置。"""
 
     mode: str
-    proxy_url: str
-    proxy_pool: tuple[str, ...]
-    rotation_strategy: str
-    resource_proxy_url: str
-    resource_proxy_pool: tuple[str, ...]
-
-    @property
-    def has_proxy(self) -> bool:
-        """返回当前模式是否配置了真实代理出口。"""
-        if self.mode == "single_proxy":
-            return bool(self.proxy_url)
-        if self.mode == "proxy_pool":
-            return bool(self.proxy_pool)
-        return False
+    resin_url_template: str
+    enabled_pool_entries: int
 
 
-def normalize_proxy_list(value: Any, *, path: str) -> list[str]:
-    """把数组、逗号文本或多行文本规范化为去重后的代理 URL 列表。"""
-    if value in (None, ""):
-        return []
-    if isinstance(value, str):
-        items = re.split(r"[,\r\n]+", value)
-    elif isinstance(value, (list, tuple)):
-        items = value
-    else:
+def validate_resin_url_template(value: Any) -> str:
+    """校验 Resin 正向代理 URL 模板。"""
+    template = str(value or "").strip()
+    path = "proxy.resin.url_template"
+    if not template:
         raise ProxyConfigIssue(
-            "Proxy pool must be a list or separated text",
+            "Resin 代理 URL 模板为必填项",
             path,
-            "invalid_proxy_pool",
+            "resin_proxy_url_required",
         )
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for index, item in enumerate(items, start=1):
-        url = str(item or "").strip()
-        if not url:
-            continue
-        validate_proxy_url(url, path=f"{path}[{index - 1}]")
-        if url in seen:
-            continue
-        seen.add(url)
-        normalized.append(url)
-    return normalized
-
-
-def validate_proxy_url(value: Any, *, path: str, allow_empty: bool = False) -> str:
-    """校验并返回去除首尾空白后的代理 URL。"""
-    url = str(value or "").strip()
-    if not url:
-        if allow_empty:
-            return ""
+    placeholders = set(_PLACEHOLDER_RE.findall(template))
+    if RESIN_UUID_PLACEHOLDER not in placeholders:
         raise ProxyConfigIssue(
-            "Proxy URL is required",
+            "Resin 代理 URL 模板必须包含 {uuid}",
             path,
-            "proxy_url_required",
+            "resin_uuid_placeholder_required",
         )
-
+    unknown = sorted(placeholders - {RESIN_UUID_PLACEHOLDER})
+    if unknown:
+        raise ProxyConfigIssue(
+            f"Resin 代理 URL 模板包含未支持的占位符：{unknown[0]}",
+            path,
+            "invalid_resin_proxy_placeholder",
+        )
+    rendered = template.replace(RESIN_UUID_PLACEHOLDER, _VALIDATION_UUID)
+    if "{" in rendered or "}" in rendered:
+        raise ProxyConfigIssue(
+            "Resin 代理 URL 模板的占位符语法有误",
+            path,
+            "invalid_resin_proxy_placeholder",
+        )
     try:
-        parsed = urlsplit(url.replace("{time}", "0"))
+        parsed = urlsplit(rendered)
         port = parsed.port
     except ValueError as exc:
         raise ProxyConfigIssue(
-            "Invalid proxy URL",
+            "Resin 代理 URL 模板格式有误",
             path,
-            "invalid_proxy_url",
+            "invalid_resin_proxy_url",
         ) from exc
-    if parsed.scheme.lower() not in SUPPORTED_PROXY_SCHEMES or not parsed.hostname:
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise ProxyConfigIssue(
-            "Invalid proxy URL",
+            "Resin 代理 URL 必须使用 http 或 https，并包含主机名",
             path,
-            "invalid_proxy_url",
+            "invalid_resin_proxy_url",
+        )
+    if parsed.username is None or parsed.password is None:
+        raise ProxyConfigIssue(
+            "Resin 代理 URL 必须包含用户名和密码",
+            path,
+            "invalid_resin_proxy_url",
         )
     if port is not None and not 1 <= port <= 65535:
         raise ProxyConfigIssue(
-            "Invalid proxy port",
+            "Resin 代理端口有误",
             path,
-            "invalid_proxy_url",
+            "invalid_resin_proxy_url",
         )
-    return url
+    return template
 
 
-def validate_egress_config(value: dict[str, Any]) -> ValidatedEgressConfig:
-    """校验全局出口代理配置并返回规范化结构。"""
-    mode = str(value.get("mode", "direct") or "direct").strip()
-    if mode not in SUPPORTED_EGRESS_MODES:
-        raise ProxyConfigIssue(
-            "Unsupported proxy mode",
-            "proxy.egress.mode",
-            "invalid_proxy_mode",
-        )
-
-    strategy = str(
-        value.get("rotation_strategy", "sticky_failover") or "sticky_failover"
-    ).strip()
-    if strategy not in SUPPORTED_ROTATION_STRATEGIES:
-        raise ProxyConfigIssue(
-            "Unsupported proxy rotation strategy",
-            "proxy.egress.rotation_strategy",
-            "invalid_proxy_rotation_strategy",
-        )
-
-    proxy_url = validate_proxy_url(
-        value.get("proxy_url", ""),
-        path="proxy.egress.proxy_url",
-        allow_empty=mode != "single_proxy",
-    )
-    proxy_pool = normalize_proxy_list(
-        value.get("proxy_pool", []),
-        path="proxy.egress.proxy_pool",
-    )
-    resource_proxy_url = validate_proxy_url(
-        value.get("resource_proxy_url", ""),
-        path="proxy.egress.resource_proxy_url",
-        allow_empty=True,
-    )
-    resource_proxy_pool = normalize_proxy_list(
-        value.get("resource_proxy_pool", []),
-        path="proxy.egress.resource_proxy_pool",
-    )
-
-    if mode == "proxy_pool" and not proxy_pool:
-        raise ProxyConfigIssue(
-            "Proxy pool mode requires at least one proxy",
-            "proxy.egress.proxy_pool",
-            "proxy_pool_required",
-        )
-
-    return ValidatedEgressConfig(
-        mode=mode,
-        proxy_url=proxy_url,
-        proxy_pool=tuple(proxy_pool),
-        rotation_strategy=strategy,
-        resource_proxy_url=resource_proxy_url,
-        resource_proxy_pool=tuple(resource_proxy_pool),
-    )
-
-
-def validate_effective_proxy_config(value: dict[str, Any]) -> ValidatedEgressConfig:
-    """校验完整配置中的全局出口以及 Console 回退组合。"""
+def validate_unified_proxy_config(value: dict[str, Any]) -> ValidatedUnifiedProxyConfig:
+    """校验统一出口模式、托管池和 Resin 配置。"""
     proxy = value.get("proxy")
     proxy = proxy if isinstance(proxy, dict) else {}
     egress = proxy.get("egress")
     egress = egress if isinstance(egress, dict) else {}
-    validated = validate_egress_config(egress)
+    mode = str(egress.get("mode", "direct") or "direct").strip()
+    if mode not in SUPPORTED_UNIFIED_EGRESS_MODES:
+        raise ProxyConfigIssue(
+            "代理出口模式未受支持",
+            "proxy.egress.mode",
+            "invalid_proxy_mode",
+        )
 
-    console = value.get("console")
-    console = console if isinstance(console, dict) else {}
-    pool = console.get("proxy_pool")
+    pool = proxy.get("pool")
     pool = pool if isinstance(pool, dict) else {}
-    enabled = _as_bool(pool.get("enabled", False))
-    fallback = _as_bool(pool.get("fallback_to_global_proxy", False))
+    entries = pool.get("entries", []) or []
+    if not isinstance(entries, list):
+        raise ProxyConfigIssue(
+            "托管代理节点必须是列表",
+            "proxy.pool.entries",
+            "invalid_proxy_pool",
+        )
+    from .managed_pool import ProxyEntry
+
+    enabled = 0
+    for index, item in enumerate(entries):
+        try:
+            entry = ProxyEntry.model_validate(item)
+        except ValueError as exc:
+            raise ProxyConfigIssue(
+                str(exc),
+                f"proxy.pool.entries[{index}]",
+                "invalid_proxy",
+            ) from exc
+        enabled += int(entry.enabled)
+    if mode == "managed_pool" and enabled == 0:
+        raise ProxyConfigIssue(
+            "托管代理池模式至少需要一个已启用节点",
+            "proxy.pool.entries",
+            "proxy_pool_required",
+        )
+
+    resin = proxy.get("resin")
+    resin = resin if isinstance(resin, dict) else {}
+    resin_template = str(resin.get("url_template", "") or "").strip()
+    if resin_template or mode == "resin":
+        resin_template = validate_resin_url_template(resin_template)
+    health = proxy.get("health")
+    health = health if isinstance(health, dict) else {}
     concurrency = _as_int(
-        pool.get("health_check_concurrency", 20),
-        path="console.proxy_pool.health_check_concurrency",
+        health.get("concurrency", 20),
+        path="proxy.health.concurrency",
     )
     if not 1 <= concurrency <= 100:
         raise ProxyConfigIssue(
-            "Console proxy health check concurrency must be between 1 and 100",
-            "console.proxy_pool.health_check_concurrency",
-            "invalid_console_proxy_health_concurrency",
+            "代理健康检查并发数必须在 1 到 100 之间",
+            "proxy.health.concurrency",
+            "invalid_proxy_health_concurrency",
         )
-    binding_idle_ttl_sec = _as_int(
+    binding_ttl = _as_int(
         pool.get("binding_idle_ttl_sec", 604800),
-        path="console.proxy_pool.binding_idle_ttl_sec",
+        path="proxy.pool.binding_idle_ttl_sec",
     )
-    if binding_idle_ttl_sec <= 0:
+    if binding_ttl <= 0:
         raise ProxyConfigIssue(
-            "Console proxy binding idle TTL must be greater than zero",
-            "console.proxy_pool.binding_idle_ttl_sec",
-            "invalid_console_proxy_binding_ttl",
+            "代理绑定闲置时间必须大于零",
+            "proxy.pool.binding_idle_ttl_sec",
+            "invalid_proxy_binding_ttl",
         )
-    if enabled and fallback and not validated.has_proxy:
-        raise ProxyConfigIssue(
-            "Console proxy fallback requires a configured global proxy",
-            "console.proxy_pool.fallback_to_global_proxy",
-            "invalid_console_proxy_fallback",
-        )
-    return validated
-
-
-def _as_bool(value: Any) -> bool:
-    """按配置快照约定解析布尔值。"""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
+    return ValidatedUnifiedProxyConfig(
+        mode=mode,
+        resin_url_template=resin_template,
+        enabled_pool_entries=enabled,
+    )
 
 
 def _as_int(value: Any, *, path: str) -> int:
@@ -230,20 +180,17 @@ def _as_int(value: Any, *, path: str) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise ProxyConfigIssue(
-            "Console proxy numeric setting must be an integer",
+            "代理数值配置必须为整数",
             path,
-            "invalid_console_proxy_setting",
+            "invalid_proxy_setting",
         ) from exc
 
 
 __all__ = [
     "ProxyConfigIssue",
-    "SUPPORTED_EGRESS_MODES",
-    "SUPPORTED_PROXY_SCHEMES",
-    "SUPPORTED_ROTATION_STRATEGIES",
-    "ValidatedEgressConfig",
-    "normalize_proxy_list",
-    "validate_effective_proxy_config",
-    "validate_egress_config",
-    "validate_proxy_url",
+    "RESIN_UUID_PLACEHOLDER",
+    "SUPPORTED_UNIFIED_EGRESS_MODES",
+    "ValidatedUnifiedProxyConfig",
+    "validate_resin_url_template",
+    "validate_unified_proxy_config",
 ]

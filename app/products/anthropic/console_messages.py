@@ -8,6 +8,7 @@ from typing import AsyncGenerator
 
 import orjson
 
+from app.control.account.identity import account_log_key
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError
@@ -56,8 +57,8 @@ async def _quota_sync(token: str, mode_id: int) -> None:
             await svc.refresh_call_async(token, mode_id)
     except Exception as exc:
         logger.warning(
-            "console messages quota sync failed: token={}... mode_id={} error={}",
-            token[:10],
+            "console messages quota sync failed: account_key={} mode_id={} error={}",
+            account_log_key(token),
             mode_id,
             exc,
         )
@@ -71,8 +72,8 @@ async def _fail_sync(token: str, mode_id: int, exc: BaseException | None = None)
             await svc.record_failure_async(token, mode_id, exc)
     except Exception as e:
         logger.warning(
-            "console messages fail sync error: token={}... mode_id={} error={}",
-            token[:10],
+            "console messages fail sync error: account_key={} mode_id={} error={}",
+            account_log_key(token),
             mode_id,
             e,
         )

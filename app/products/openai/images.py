@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 import orjson
 
+from app.control.account.identity import account_log_key
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError, ValidationError
@@ -21,6 +22,7 @@ from app.control.model.registry import resolve as resolve_model
 from app.control.model.enums import ModeId
 from app.control.model.spec import ModelSpec
 from app.control.account.enums import FeedbackKind
+from app.control.proxy.models import ProxyLease, ProxyScope, RequestKind
 from app.dataplane.reverse.transport.imagine_ws import stream_images
 from app.dataplane.reverse.protocol.xai_chat import (
     StreamAdapter,
@@ -44,7 +46,7 @@ from app.dataplane.reverse.transport.asset_upload import (
 from app.dataplane.reverse.transport.media import create_media_post
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.headers import build_http_headers, build_sso_cookie
-from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+from app.dataplane.proxy.adapters.session import ResettableSession
 from app.dataplane.reverse.runtime.endpoint_table import CHAT
 from ._format import (
     make_chat_response,
@@ -200,9 +202,14 @@ def _save_image(raw: bytes, mime: str, file_id: str) -> str:
     return save_local_image(raw, mime, file_id)
 
 
-async def _download_image_bytes(token: str, url: str) -> tuple[bytes, str]:
+async def _download_image_bytes(
+    token: str,
+    url: str,
+    *,
+    lease: ProxyLease | None = None,
+) -> tuple[bytes, str]:
     try:
-        stream, content_type = await download_asset(token, url)
+        stream, content_type = await download_asset(token, url, lease=lease)
         chunks: list[bytes] = []
         async for chunk in stream:
             chunks.append(chunk)
@@ -219,6 +226,7 @@ async def _resolve_image_output(
     url: str,
     response_format: str,
     blob_b64: str | None = None,
+    lease: ProxyLease | None = None,
 ) -> _ImageOutput:
     fmt = _normalize_response_format(response_format)
     cfg = get_config()
@@ -238,7 +246,7 @@ async def _resolve_image_output(
         except (ValueError, TypeError, binascii.Error) as exc:
             raise UpstreamError(f"Invalid upstream image blob: {exc}") from exc
     else:
-        raw, mime = await _download_image_bytes(token, url)
+        raw, mime = await _download_image_bytes(token, url, lease=lease)
 
     if fmt == "b64_json":
         b64 = blob_b64 or base64.b64encode(raw).decode()
@@ -321,6 +329,17 @@ async def generate(
     response_id = make_response_id()
     enable_pro  = model in _PRO_IMAGE_MODELS
     _ws_mode_id = int(spec.mode_id)
+    try:
+        proxy = await get_proxy_runtime()
+        lease = await proxy.acquire(
+            token=token,
+            scope=ProxyScope.APP,
+            kind=RequestKind.WEBSOCKET,
+            clearance_origin="https://grok.com",
+        )
+    except Exception:
+        await _acct_dir.release(acct)
+        raise
 
     if stream:
         async def _sse_stream() -> AsyncGenerator[str, None]:
@@ -336,6 +355,7 @@ async def generate(
                     n            = n,
                     enable_nsfw  = enable_nsfw,
                     enable_pro   = enable_pro,
+                    lease        = lease,
                 ):
                     ev_type = ev.get("type")
                     if ev_type == "error":
@@ -374,6 +394,7 @@ async def generate(
                         url=ev.get("url", ""),
                         response_format=response_format,
                         blob_b64=ev.get("blob") or None,
+                        lease=lease,
                     )
                     content = _output_content(image, chat_format=chat_format)
                     chunk = make_stream_chunk(response_id, model, content)
@@ -411,6 +432,7 @@ async def generate(
             n            = n,
             enable_nsfw  = enable_nsfw,
             enable_pro   = enable_pro,
+            lease        = lease,
         ):
             ev_type = ev.get("type")
             if ev_type == "error":
@@ -447,6 +469,7 @@ async def generate(
                     url=ev.get("url", ""),
                     response_format=response_format,
                     blob_b64=ev.get("blob") or None,
+                    lease=lease,
                 )
                 finals.append(image)
         success = True
@@ -637,11 +660,19 @@ def _normalize_edit_size(size: str) -> str:
 
 
 async def _prepare_edit_reference(
-    token: str, image_input: str, index: int
+    token: str,
+    image_input: str,
+    index: int,
+    *,
+    lease: ProxyLease,
 ) -> _EditReference:
     """Upload one edit reference and resolve it to the upstream content URL."""
     try:
-        file_id, file_uri = await upload_from_input(token, image_input)
+        file_id, file_uri = await upload_from_input(
+            token,
+            image_input,
+            lease=lease,
+        )
         return _EditReference(
             file_id=file_id,
             content_url=resolve_uploaded_asset_reference(token, file_id, file_uri),
@@ -659,13 +690,21 @@ async def _prepare_edit_reference(
 
 
 async def _prepare_edit_references(
-    token: str, image_inputs: list[str]
+    token: str,
+    image_inputs: list[str],
+    *,
+    lease: ProxyLease,
 ) -> list[_EditReference]:
     """Upload edit references concurrently and preserve caller order."""
     results: list[_EditReference | None] = [None] * len(image_inputs)
 
     async def _runner(index: int, image_input: str) -> None:
-        results[index] = await _prepare_edit_reference(token, image_input, index)
+        results[index] = await _prepare_edit_reference(
+            token,
+            image_input,
+            index,
+            lease=lease,
+        )
 
     async with asyncio.TaskGroup() as tg:
         for index, image_input in enumerate(image_inputs):
@@ -800,6 +839,7 @@ async def _collect_edit_final_urls(
     parent_post_id: str,
     timeout_s: float,
     progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
+    lease: ProxyLease,
 ) -> dict[int, str]:
     """Collect final image URLs from the dedicated image-edit SSE stream."""
     final_urls: dict[int, str] = {}
@@ -810,6 +850,7 @@ async def _collect_edit_final_urls(
         image_references,
         parent_post_id,
         timeout_s=timeout_s,
+        lease=lease,
     ):
         ev_type, data = classify_line(line)
         if ev_type == "done":
@@ -847,6 +888,7 @@ async def _collect_edit_images(
     response_format: str,
     timeout_s: float,
     progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
+    lease: ProxyLease,
 ) -> list[_ImageOutput]:
     """Collect up to *requested_n* edit results.
 
@@ -865,6 +907,7 @@ async def _collect_edit_images(
             parent_post_id=parent_post_id,
             timeout_s=timeout_s,
             progress_cb=progress_cb,
+            lease=lease,
         )
         for _, url in sorted(final_urls.items()):
             if url in seen_urls:
@@ -875,6 +918,7 @@ async def _collect_edit_images(
                     token=token,
                     url=url,
                     response_format=response_format,
+                    lease=lease,
                 )
             )
             if len(images) >= requested_n:
@@ -898,9 +942,11 @@ async def _stream_image_edit(
     parent_post_id: str,
     *,
     timeout_s: float = 120.0,
+    lease: ProxyLease | None = None,
 ) -> AsyncGenerator[str, None]:
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire()
+    if lease is None:
+        lease = await proxy.acquire(token=token)
     payload = build_image_edit_payload(
         prompt=prompt,
         image_references=image_references,
@@ -912,9 +958,7 @@ async def _stream_image_edit(
         origin="https://grok.com",
         referer=f"https://grok.com/imagine/post/{parent_post_id}",
     )
-    kwargs = build_session_kwargs(lease=lease)
-
-    async with ResettableSession(**kwargs) as session:
+    async with ResettableSession(lease=lease) as session:
         response = await session.post(
             CHAT,
             headers=headers,
@@ -939,9 +983,11 @@ async def _stream_lite_generate(
     mode_id:     ModeId,
     *,
     timeout_s: float = 120.0,
+    lease: ProxyLease | None = None,
 ) -> AsyncGenerator[str, None]:
-    proxy   = await get_proxy_runtime()
-    lease   = await proxy.acquire()
+    proxy = await get_proxy_runtime()
+    if lease is None:
+        lease = await proxy.acquire(token=token)
     payload = build_chat_payload(
         message           = f"Drawing: {message}",
         mode_id           = mode_id,
@@ -949,9 +995,7 @@ async def _stream_lite_generate(
         request_overrides = {"imageGenerationCount": 2},
     )
     headers = build_http_headers(token, lease=lease)
-    kwargs  = build_session_kwargs(lease=lease)
-
-    async with ResettableSession(**kwargs) as session:
+    async with ResettableSession(lease=lease) as session:
         response = await session.post(
             CHAT,
             headers = headers,
@@ -1004,11 +1048,14 @@ async def _run_lite_request(
         fail_exc: BaseException | None = None
 
         try:
+            proxy = await get_proxy_runtime()
+            lease = await proxy.acquire(token=token)
             async for line in _stream_lite_generate(
                 token,
                 prompt,
                 spec.mode_id,
                 timeout_s=timeout_s,
+                lease=lease,
             ):
                 ev_type, data = classify_line(line)
                 if ev_type == "done":
@@ -1029,6 +1076,7 @@ async def _run_lite_request(
                             token=token,
                             url=ev.content,
                             response_format=response_format,
+                            lease=lease,
                         )
                         success = True
                         return image
@@ -1038,11 +1086,11 @@ async def _run_lite_request(
             if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
                 retry = True
                 logger.warning(
-                    "lite image retry scheduled: attempt={}/{} status={} token={}...",
+                    "lite image retry scheduled: attempt={}/{} status={} account_key={}",
                     attempt + 1,
                     max_retries,
                     exc.status,
-                    token[:8],
+                    account_log_key(token),
                 )
             else:
                 raise
@@ -1139,7 +1187,13 @@ async def edit(
     edit_prompt = prompt
 
     try:
-        edit_references = await _prepare_edit_references(token, image_inputs)
+        proxy = await get_proxy_runtime()
+        lease = await proxy.acquire(token=token)
+        edit_references = await _prepare_edit_references(
+            token,
+            image_inputs,
+            lease=lease,
+        )
         if not edit_references:
             raise UpstreamError("All image uploads failed; cannot proceed with image edit")
         edit_prompt = _replace_edit_image_placeholders(prompt, edit_references)
@@ -1149,6 +1203,7 @@ async def edit(
             token,
             media_type=IMAGE_POST_MEDIA_TYPE,
             prompt=edit_prompt,
+            lease=lease,
         )
         post_data = post.get("post")
         if not isinstance(post_data, dict):
@@ -1188,6 +1243,7 @@ async def edit(
                         response_format=response_format,
                         timeout_s=timeout_s,
                         progress_cb=_progress,
+                        lease=lease,
                     )
                 )
                 while not task.done() or not queue.empty():
@@ -1257,6 +1313,7 @@ async def edit(
             response_format=response_format,
             timeout_s=timeout_s,
             progress_cb=_progress,
+            lease=lease,
         )
         success = True
     except BaseException as exc:

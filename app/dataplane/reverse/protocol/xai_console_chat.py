@@ -37,7 +37,7 @@ import orjson
 from app.platform.errors import UpstreamError
 from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
-from app.control.proxy.models import ProxyFeedbackKind
+from app.control.proxy.models import ProxyFeedbackKind, ProxyProvider
 from app.dataplane.reverse.protocol.tool_parser import ParsedToolCall
 from app.dataplane.reverse.transport.console_dpop import (
     ConsoleDPoPTokenError,
@@ -868,24 +868,23 @@ async def stream_console_chat(
     走现有的 proxy lease + curl-cffi 体系，与 grok.com 共用 CF clearance。
     """
     from app.dataplane.proxy import get_proxy_runtime
-    from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+    from app.dataplane.proxy.adapters.session import ResettableSession
     from app.dataplane.reverse.runtime.endpoint_table import CONSOLE_RESPONSES
 
     proxy = await get_proxy_runtime()
-    console_pool = await _get_console_proxy_pool_safe()
     cfg = get_config()
-    max_proxy_retries = max(0, cfg.get_int("console.proxy_pool.max_proxy_retries_per_request", 1))
+    max_proxy_retries = max(
+        0,
+        cfg.get_int("proxy.pool.max_proxy_retries_per_request", 1),
+    )
     payload_bytes = orjson.dumps(payload)
 
     for proxy_attempt in range(max_proxy_retries + 1):
-        lease = await console_pool.acquire(
+        lease = await proxy.acquire(
             token=token,
-            fallback_lease_factory=proxy.acquire,
             clearance_origin="https://console.x.ai",
         )
-        session_kwargs = build_session_kwargs(lease=lease)
-
-        async with ResettableSession(**session_kwargs) as session:
+        async with ResettableSession(lease=lease) as session:
             try:
                 response = await _post_console_dpop(
                     session=session,
@@ -914,7 +913,7 @@ async def stream_console_chat(
                 failure_headers = {}
             except ConsoleDPoPTransportError as exc:
                 feedback = _transport_error_feedback(str(exc))
-                await _feedback_console_proxy(proxy, console_pool, lease, feedback)
+                await proxy.feedback(lease, feedback)
                 if _should_retry_console_proxy(lease, feedback, proxy_attempt, max_proxy_retries):
                     logger.warning(
                         "console proxy retry on transport error: attempt={}/{} proxy_id={} error={}",
@@ -929,23 +928,23 @@ async def stream_console_chat(
             if failure_status != 200:
                 body = failure_body
                 retry_after = failure_headers.get("retry-after", "")
-                proxy_hash = _short_hash(lease.proxy_url or "")
+                affinity_hash = _short_hash(lease.affinity_key)
                 raw_body_class = _classify_console_error_body(body)
                 body_class = _console_non_200_body_class(failure_status, body)
                 error_code = _console_non_200_code(failure_status, raw_body_class)
                 logger.warning(
                     (
                         "console upstream non-200 observed: status={} model={} effort={} "
-                        "token_hash={} proxy_hash={} has_proxy={} proxy_pool={} proxy_id={} body_class={} "
+                        "token_hash={} affinity_hash={} has_proxy={} provider={} proxy_id={} body_class={} "
                         "body_len={} body_sha256={} retry_after={} body_preview={}"
                     ),
                     failure_status,
                     payload.get("model", ""),
                     (payload.get("reasoning") or {}).get("effort", ""),
                     _short_hash(token),
-                    proxy_hash,
+                    affinity_hash,
                     bool(lease.proxy_url),
-                    lease.proxy_pool or "global",
+                    lease.provider.value,
                     lease.proxy_id or "-",
                     body_class,
                     len(body),
@@ -954,7 +953,7 @@ async def stream_console_chat(
                     _sanitize_observation_text(body),
                 )
                 feedback = _status_feedback(failure_status, body_class)
-                await _feedback_console_proxy(proxy, console_pool, lease, feedback)
+                await proxy.feedback(lease, feedback)
                 if _should_retry_console_proxy(lease, feedback, proxy_attempt, max_proxy_retries):
                     logger.warning(
                         "console proxy retry on status: attempt={}/{} proxy_id={} status={}",
@@ -979,7 +978,7 @@ async def stream_console_chat(
 
             if response is None:
                 raise UpstreamError("Console response state is invalid", status=502)
-            await _feedback_console_proxy(proxy, console_pool, lease, _success_feedback())
+            await proxy.feedback(lease, _success_feedback())
 
             current_event = ""
             try:
@@ -1054,20 +1053,12 @@ async def _post_console_dpop(
     raise UpstreamError("Console DPoP retry state is invalid", status=502)
 
 
-async def _get_console_proxy_pool_safe():
-    from app.control.proxy.console_pool import get_console_proxy_pool
-    return await get_console_proxy_pool()
-
-
-async def _feedback_console_proxy(proxy, console_pool, lease, feedback) -> None:
-    """同时回写全局 clearance 状态和 Console 专用代理池状态。"""
-    await proxy.feedback(lease, feedback)
-    await console_pool.feedback(lease, feedback)
-
-
 def _should_retry_console_proxy(lease, feedback, attempt: int, max_attempts: int) -> bool:
     """返回当前失败是否允许在同一账号下重绑代理重试。"""
-    if attempt >= max_attempts or lease.proxy_pool != "console":
+    if attempt >= max_attempts or lease.provider not in {
+        ProxyProvider.MANAGED_POOL,
+        ProxyProvider.RESIN,
+    }:
         return False
     return feedback.kind == ProxyFeedbackKind.TRANSPORT_ERROR or feedback.status_code == 407
 
@@ -1086,7 +1077,7 @@ def _status_feedback(status: int, body_class: str = ""):
         kind = ProxyFeedbackKind.SUCCESS
     elif status == 407:
         kind = ProxyFeedbackKind.UNAUTHORIZED
-    elif status == 403 and body_class not in {"dpop_required", "account_blocked"}:
+    elif status == 403 and body_class == "cloudflare_challenge":
         kind = ProxyFeedbackKind.CHALLENGE
     elif status == 429:
         kind = ProxyFeedbackKind.RATE_LIMITED

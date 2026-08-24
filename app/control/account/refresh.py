@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from app.control.account.identity import account_log_key
 from app.platform.errors import UpstreamError
 from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
@@ -118,8 +119,8 @@ class AccountRefreshService:
             raise
         except Exception as exc:
             logger.debug(
-                "account quota fetch failed: token={}... pool={} error={}",
-                token[:10],
+                "account quota fetch failed: account_key={} pool={} error={}",
+                account_log_key(token),
                 pool,
                 exc,
             )
@@ -131,8 +132,8 @@ class AccountRefreshService:
         """Fetch a single mode quota window."""
         if not supports_mode(pool, mode_id):
             logger.debug(
-                "account mode quota fetch skipped: token={}... pool={} mode_id={} reason=unsupported_mode",
-                token[:10],
+                "account mode quota fetch skipped: account_key={} pool={} mode_id={} reason=unsupported_mode",
+                account_log_key(token),
                 pool,
                 mode_id,
             )
@@ -145,8 +146,8 @@ class AccountRefreshService:
             raise
         except Exception as exc:
             logger.debug(
-                "account mode quota fetch failed: token={}... pool={} mode_id={} error={}",
-                token[:10],
+                "account mode quota fetch failed: account_key={} pool={} mode_id={} error={}",
+                account_log_key(token),
                 pool,
                 mode_id,
                 exc,
@@ -344,8 +345,8 @@ class AccountRefreshService:
         pool_patch = inferred if inferred is not None and inferred != record.pool else None
         if pool_patch:
             logger.info(
-                "account pool updated from live quota: token={}... previous_pool={} current_pool={}",
-                record.token[:10],
+                "account pool updated from live quota: account_key={} previous_pool={} current_pool={}",
+                account_log_key(record.token),
                 record.pool,
                 inferred,
             )
@@ -476,8 +477,8 @@ class AccountRefreshService:
                                 ext_merge["expired_at"] = now
                                 ext_merge["expired_reason"] = "console_429_threshold_exceeded"
                                 logger.info(
-                                    "account marked expired due to repeated 429: token={}... count={}",
-                                    token[:10],
+                                    "account marked expired due to repeated 429: account_key={} count={}",
+                                    account_log_key(token),
                                     new_429_count,
                                 )
                             extra_patch["ext_merge"] = ext_merge
@@ -520,8 +521,8 @@ class AccountRefreshService:
             )
         except Exception as exc:
             logger.debug(
-                "account failure record update failed: token={}... error={}",
-                token[:10],
+                "account failure record update failed: account_key={} error={}",
+                account_log_key(token),
                 exc,
             )
 
@@ -538,8 +539,8 @@ class AccountRefreshService:
         mode_key = _MODE_KEYS.get(mode_id)
         if mode_key is None:
             logger.warning(
-                "account single-mode sync skipped: token={}... pool={} mode_id={} reason=unknown_mode",
-                record.token[:10],
+                "account single-mode sync skipped: account_key={} pool={} mode_id={} reason=unknown_mode",
+                account_log_key(record.token),
                 record.pool,
                 mode_id,
             )
@@ -550,8 +551,8 @@ class AccountRefreshService:
             normalized = normalize_quota_window(record.pool, mode_id, window)
             if normalized is None:
                 logger.debug(
-                    "account single-mode quota patch skipped: token={}... pool={} mode_id={} reason=unsupported_mode",
-                    record.token[:10],
+                    "account single-mode quota patch skipped: account_key={} pool={} mode_id={} reason=unsupported_mode",
+                    account_log_key(record.token),
                     record.pool,
                     mode_id,
                 )
@@ -604,8 +605,8 @@ class AccountRefreshService:
                     ).to_dict()
             else:
                 logger.debug(
-                    "account single-mode quota patch skipped: token={}... pool={} mode_id={} reason=unsupported_mode",
-                    record.token[:10],
+                    "account single-mode quota patch skipped: account_key={} pool={} mode_id={} reason=unsupported_mode",
+                    account_log_key(record.token),
                     record.pool,
                     mode_id,
                 )

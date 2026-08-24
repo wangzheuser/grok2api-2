@@ -1,4 +1,4 @@
-"""Console 代理池共享运行态模型与仓储协议。"""
+"""托管代理池共享运行态模型与仓储协议。"""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 
-class ConsoleProxyHealthState(StrEnum):
-    """Console 代理节点的共享健康状态。"""
+class ProxyHealthState(StrEnum):
+    """托管代理节点的共享健康状态。"""
 
     UNKNOWN = "unknown"
     HEALTHY = "healthy"
@@ -18,7 +18,7 @@ class ConsoleProxyHealthState(StrEnum):
     DEAD = "dead"
 
 
-class ConsoleProxyProbeOutcome(StrEnum):
+class ProxyProbeOutcome(StrEnum):
     """一次主动探测的业务判定。"""
 
     HEALTHY = "healthy"
@@ -27,7 +27,7 @@ class ConsoleProxyProbeOutcome(StrEnum):
     SKIPPED = "skipped"
 
 
-class ConsoleProxyHealthJobKind(StrEnum):
+class ProxyHealthJobKind(StrEnum):
     """健康检查任务的触发来源。"""
 
     BOOTSTRAP = "bootstrap"
@@ -36,9 +36,10 @@ class ConsoleProxyHealthJobKind(StrEnum):
     INCREMENTAL = "incremental"
     MANUAL_SINGLE = "manual_single"
     MANUAL_SELECTION = "manual_selection"
+    PROVIDER_MANUAL = "provider_manual"
 
 
-class ConsoleProxyHealthJobStatus(StrEnum):
+class ProxyHealthJobStatus(StrEnum):
     """健康检查后台任务状态。"""
 
     QUEUED = "queued"
@@ -49,7 +50,7 @@ class ConsoleProxyHealthJobStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class ConsoleProxyStateSeed:
+class ProxyStateSeed:
     """配置条目同步到运行态时使用的非敏感身份。"""
 
     proxy_id: str
@@ -57,12 +58,12 @@ class ConsoleProxyStateSeed:
 
 
 @dataclass(frozen=True, slots=True)
-class ConsoleProxyRuntimeRecord:
+class ProxyRuntimeRecord:
     """一个代理节点的共享运行态。"""
 
     proxy_id: str
     generation: int
-    health_state: ConsoleProxyHealthState = ConsoleProxyHealthState.UNKNOWN
+    health_state: ProxyHealthState = ProxyHealthState.UNKNOWN
     checking: bool = False
     runtime_epoch: int = 0
     last_error: str = ""
@@ -83,13 +84,13 @@ class ConsoleProxyRuntimeRecord:
     def is_schedulable(self, timestamp_ms: int) -> bool:
         """返回节点在指定时间是否可参与新绑定。"""
         return (
-            self.health_state == ConsoleProxyHealthState.HEALTHY
+            self.health_state == ProxyHealthState.HEALTHY
             and (self.next_retry_at is None or timestamp_ms >= self.next_retry_at)
         )
 
 
 @dataclass(frozen=True, slots=True)
-class ConsoleProxyBindingCandidate:
+class ProxyBindingCandidate:
     """一次账号绑定可选择的节点身份。"""
 
     proxy_id: str
@@ -97,7 +98,7 @@ class ConsoleProxyBindingCandidate:
 
 
 @dataclass(frozen=True, slots=True)
-class ConsoleProxyBinding:
+class ProxyBinding:
     """共享账号 sticky 绑定。"""
 
     account_key: str
@@ -108,15 +109,15 @@ class ConsoleProxyBinding:
 
 
 @dataclass(frozen=True, slots=True)
-class ConsoleProxyBindingAssignment:
+class ProxyBindingAssignment:
     """原子绑定结果及其对应运行态版本。"""
 
-    binding: ConsoleProxyBinding
-    runtime: ConsoleProxyRuntimeRecord
+    binding: ProxyBinding
+    runtime: ProxyRuntimeRecord
 
 
 @dataclass(frozen=True, slots=True)
-class ConsoleProxyHealthJobItem:
+class ProxyHealthJobItem:
     """健康任务捕获的节点配置版本。"""
 
     proxy_id: str
@@ -126,13 +127,13 @@ class ConsoleProxyHealthJobItem:
 
 
 @dataclass(frozen=True, slots=True)
-class ConsoleProxyHealthJob:
+class ProxyHealthJob:
     """可跨 Worker 恢复的健康检查任务。"""
 
     job_id: str
-    kind: ConsoleProxyHealthJobKind
+    kind: ProxyHealthJobKind
     dedupe_key: str
-    status: ConsoleProxyHealthJobStatus
+    status: ProxyHealthJobStatus
     total: int
     completed: int = 0
     healthy: int = 0
@@ -149,8 +150,8 @@ class ConsoleProxyHealthJob:
 
 
 @runtime_checkable
-class ConsoleProxyStateRepository(Protocol):
-    """Console 代理共享运行态的存储契约。"""
+class ManagedProxyStateRepository(Protocol):
+    """托管代理共享运行态的存储契约。"""
 
     async def initialize(self) -> None:
         """创建所需表、索引或 Redis 元数据。"""
@@ -158,38 +159,38 @@ class ConsoleProxyStateRepository(Protocol):
 
     async def sync_entries(
         self,
-        entries: list[ConsoleProxyStateSeed],
+        entries: list[ProxyStateSeed],
         *,
         timestamp_ms: int,
     ) -> None:
         """同步配置身份，新增或变更 generation 的节点重置为 unknown。"""
         ...
 
-    async def runtime_snapshot(self) -> dict[str, ConsoleProxyRuntimeRecord]:
+    async def runtime_snapshot(self) -> dict[str, ProxyRuntimeRecord]:
         """返回所有节点运行态。"""
         ...
 
-    async def get_runtime(self, proxy_id: str) -> ConsoleProxyRuntimeRecord | None:
+    async def get_runtime(self, proxy_id: str) -> ProxyRuntimeRecord | None:
         """返回指定节点运行态。"""
         ...
 
     async def compare_and_swap_runtime(
         self,
-        expected: ConsoleProxyRuntimeRecord,
-        updated: ConsoleProxyRuntimeRecord,
+        expected: ProxyRuntimeRecord,
+        updated: ProxyRuntimeRecord,
         *,
         clear_bindings: bool = False,
-    ) -> ConsoleProxyRuntimeRecord | None:
+    ) -> ProxyRuntimeRecord | None:
         """按 generation 和 version 条件更新运行态。"""
         ...
 
     async def acquire_binding(
         self,
         account_key: str,
-        candidates: list[ConsoleProxyBindingCandidate],
+        candidates: list[ProxyBindingCandidate],
         *,
         timestamp_ms: int,
-    ) -> ConsoleProxyBindingAssignment | None:
+    ) -> ProxyBindingAssignment | None:
         """原子复用或创建账号绑定。"""
         ...
 
@@ -208,19 +209,19 @@ class ConsoleProxyStateRepository(Protocol):
     async def create_health_job(
         self,
         *,
-        kind: ConsoleProxyHealthJobKind,
+        kind: ProxyHealthJobKind,
         dedupe_key: str,
-        items: list[ConsoleProxyStateSeed],
+        items: list[ProxyStateSeed],
         timestamp_ms: int,
-    ) -> ConsoleProxyHealthJob:
+    ) -> ProxyHealthJob:
         """创建健康任务，存在同范围活动任务时返回已有任务。"""
         ...
 
-    async def get_health_job(self, job_id: str) -> ConsoleProxyHealthJob | None:
+    async def get_health_job(self, job_id: str) -> ProxyHealthJob | None:
         """返回指定健康任务。"""
         ...
 
-    async def get_active_health_job(self) -> ConsoleProxyHealthJob | None:
+    async def get_active_health_job(self) -> ProxyHealthJob | None:
         """返回最近一个未结束任务。"""
         ...
 
@@ -230,7 +231,7 @@ class ConsoleProxyStateRepository(Protocol):
         owner: str,
         timestamp_ms: int,
         lease_ms: int,
-    ) -> ConsoleProxyHealthJob | None:
+    ) -> ProxyHealthJob | None:
         """认领排队中或租约已过期的任务。"""
         ...
 
@@ -248,7 +249,7 @@ class ConsoleProxyStateRepository(Protocol):
     async def pending_health_job_items(
         self,
         job_id: str,
-    ) -> list[ConsoleProxyHealthJobItem]:
+    ) -> list[ProxyHealthJobItem]:
         """返回任务尚未完成的节点。"""
         ...
 
@@ -258,7 +259,7 @@ class ConsoleProxyStateRepository(Protocol):
         *,
         proxy_id: str,
         generation: int,
-        outcome: ConsoleProxyProbeOutcome,
+        outcome: ProxyProbeOutcome,
         timestamp_ms: int,
     ) -> bool:
         """幂等完成一个任务节点并累加任务计数。"""
@@ -271,7 +272,7 @@ class ConsoleProxyStateRepository(Protocol):
         owner: str,
         timestamp_ms: int,
         error: str = "",
-    ) -> ConsoleProxyHealthJob | None:
+    ) -> ProxyHealthJob | None:
         """完成或标记失败一个健康任务。"""
         ...
 
@@ -288,15 +289,15 @@ class ConsoleProxyStateRepository(Protocol):
 class _InMemoryState:
     """内存仓储内部状态。"""
 
-    runtimes: dict[str, ConsoleProxyRuntimeRecord] = field(default_factory=dict)
-    bindings: dict[str, ConsoleProxyBinding] = field(default_factory=dict)
-    jobs: dict[str, ConsoleProxyHealthJob] = field(default_factory=dict)
-    job_items: dict[str, dict[str, ConsoleProxyHealthJobItem]] = field(
+    runtimes: dict[str, ProxyRuntimeRecord] = field(default_factory=dict)
+    bindings: dict[str, ProxyBinding] = field(default_factory=dict)
+    jobs: dict[str, ProxyHealthJob] = field(default_factory=dict)
+    job_items: dict[str, dict[str, ProxyHealthJobItem]] = field(
         default_factory=dict
     )
 
 
-class InMemoryConsoleProxyStateRepository:
+class InMemoryManagedProxyStateRepository:
     """测试和单进程构造使用的内存共享状态仓储。"""
 
     def __init__(self) -> None:
@@ -308,7 +309,7 @@ class InMemoryConsoleProxyStateRepository:
 
     async def sync_entries(
         self,
-        entries: list[ConsoleProxyStateSeed],
+        entries: list[ProxyStateSeed],
         *,
         timestamp_ms: int,
     ) -> None:
@@ -318,7 +319,7 @@ class InMemoryConsoleProxyStateRepository:
             for proxy_id, seed in seeds.items():
                 current = self._state.runtimes.get(proxy_id)
                 if current is None or current.generation != seed.generation:
-                    self._state.runtimes[proxy_id] = ConsoleProxyRuntimeRecord(
+                    self._state.runtimes[proxy_id] = ProxyRuntimeRecord(
                         proxy_id=proxy_id,
                         generation=seed.generation,
                         runtime_epoch=(current.runtime_epoch + 1 if current else 0),
@@ -334,23 +335,23 @@ class InMemoryConsoleProxyStateRepository:
                 and seeds[binding.proxy_id].generation == binding.generation
             }
 
-    async def runtime_snapshot(self) -> dict[str, ConsoleProxyRuntimeRecord]:
+    async def runtime_snapshot(self) -> dict[str, ProxyRuntimeRecord]:
         """返回不可变运行态对象的字典副本。"""
         async with self._lock:
             return dict(self._state.runtimes)
 
-    async def get_runtime(self, proxy_id: str) -> ConsoleProxyRuntimeRecord | None:
+    async def get_runtime(self, proxy_id: str) -> ProxyRuntimeRecord | None:
         """返回指定节点运行态。"""
         async with self._lock:
             return self._state.runtimes.get(proxy_id)
 
     async def compare_and_swap_runtime(
         self,
-        expected: ConsoleProxyRuntimeRecord,
-        updated: ConsoleProxyRuntimeRecord,
+        expected: ProxyRuntimeRecord,
+        updated: ProxyRuntimeRecord,
         *,
         clear_bindings: bool = False,
-    ) -> ConsoleProxyRuntimeRecord | None:
+    ) -> ProxyRuntimeRecord | None:
         """按版本原子更新内存运行态。"""
         async with self._lock:
             current = self._state.runtimes.get(expected.proxy_id)
@@ -373,10 +374,10 @@ class InMemoryConsoleProxyStateRepository:
     async def acquire_binding(
         self,
         account_key: str,
-        candidates: list[ConsoleProxyBindingCandidate],
+        candidates: list[ProxyBindingCandidate],
         *,
         timestamp_ms: int,
-    ) -> ConsoleProxyBindingAssignment | None:
+    ) -> ProxyBindingAssignment | None:
         """原子复用绑定或选择当前绑定数最少的健康节点。"""
         candidate_map = {item.proxy_id: item for item in candidates}
         async with self._lock:
@@ -393,10 +394,10 @@ class InMemoryConsoleProxyStateRepository:
                 ):
                     touched = replace(existing, last_used_at=timestamp_ms)
                     self._state.bindings[account_key] = touched
-                    return ConsoleProxyBindingAssignment(touched, runtime)
+                    return ProxyBindingAssignment(touched, runtime)
                 self._state.bindings.pop(account_key, None)
 
-            eligible: list[tuple[ConsoleProxyBindingCandidate, ConsoleProxyRuntimeRecord]] = []
+            eligible: list[tuple[ProxyBindingCandidate, ProxyRuntimeRecord]] = []
             for candidate in candidates:
                 runtime = self._state.runtimes.get(candidate.proxy_id)
                 if (
@@ -416,7 +417,7 @@ class InMemoryConsoleProxyStateRepository:
                 eligible,
                 key=lambda item: (counts[item[0].proxy_id], item[0].proxy_id),
             )
-            binding = ConsoleProxyBinding(
+            binding = ProxyBinding(
                 account_key=account_key,
                 proxy_id=candidate.proxy_id,
                 generation=candidate.generation,
@@ -424,7 +425,7 @@ class InMemoryConsoleProxyStateRepository:
                 last_used_at=timestamp_ms,
             )
             self._state.bindings[account_key] = binding
-            return ConsoleProxyBindingAssignment(binding, runtime)
+            return ProxyBindingAssignment(binding, runtime)
 
     async def clear_bindings(self, proxy_id: str | None = None) -> int:
         """清除全部或指定节点绑定。"""
@@ -461,11 +462,11 @@ class InMemoryConsoleProxyStateRepository:
     async def create_health_job(
         self,
         *,
-        kind: ConsoleProxyHealthJobKind,
+        kind: ProxyHealthJobKind,
         dedupe_key: str,
-        items: list[ConsoleProxyStateSeed],
+        items: list[ProxyStateSeed],
         timestamp_ms: int,
-    ) -> ConsoleProxyHealthJob:
+    ) -> ProxyHealthJob:
         """创建或复用相同范围的活动健康任务。"""
         async with self._lock:
             for job in self._state.jobs.values():
@@ -473,13 +474,13 @@ class InMemoryConsoleProxyStateRepository:
                     job.dedupe_key == dedupe_key
                     and job.status
                     in {
-                        ConsoleProxyHealthJobStatus.QUEUED,
-                        ConsoleProxyHealthJobStatus.RUNNING,
+                        ProxyHealthJobStatus.QUEUED,
+                        ProxyHealthJobStatus.RUNNING,
                     }
                 ):
                     return job
             unique = {(item.proxy_id, item.generation): item for item in items}
-            if kind == ConsoleProxyHealthJobKind.BOOTSTRAP:
+            if kind == ProxyHealthJobKind.BOOTSTRAP:
                 # 新 bootstrap 在创建任务的同一临界区关闭旧健康租约，
                 # 多 Worker 复用活动任务时不会重复抬升 runtime_epoch。
                 reset_ids: set[str] = set()
@@ -488,12 +489,12 @@ class InMemoryConsoleProxyStateRepository:
                     if (
                         runtime is None
                         or runtime.generation != generation
-                        or runtime.health_state != ConsoleProxyHealthState.HEALTHY
+                        or runtime.health_state != ProxyHealthState.HEALTHY
                     ):
                         continue
                     self._state.runtimes[proxy_id] = replace(
                         runtime,
-                        health_state=ConsoleProxyHealthState.UNKNOWN,
+                        health_state=ProxyHealthState.UNKNOWN,
                         checking=False,
                         runtime_epoch=runtime.runtime_epoch + 1,
                         last_error="",
@@ -513,28 +514,28 @@ class InMemoryConsoleProxyStateRepository:
                         if binding.proxy_id not in reset_ids
                     }
             job_id = uuid.uuid4().hex
-            job = ConsoleProxyHealthJob(
+            job = ProxyHealthJob(
                 job_id=job_id,
                 kind=kind,
                 dedupe_key=dedupe_key,
-                status=ConsoleProxyHealthJobStatus.QUEUED,
+                status=ProxyHealthJobStatus.QUEUED,
                 total=len(unique),
                 created_at=timestamp_ms,
                 updated_at=timestamp_ms,
             )
             self._state.jobs[job_id] = job
             self._state.job_items[job_id] = {
-                proxy_id: ConsoleProxyHealthJobItem(proxy_id, generation)
+                proxy_id: ProxyHealthJobItem(proxy_id, generation)
                 for proxy_id, generation in unique
             }
             return job
 
-    async def get_health_job(self, job_id: str) -> ConsoleProxyHealthJob | None:
+    async def get_health_job(self, job_id: str) -> ProxyHealthJob | None:
         """返回指定内存任务。"""
         async with self._lock:
             return self._state.jobs.get(job_id)
 
-    async def get_active_health_job(self) -> ConsoleProxyHealthJob | None:
+    async def get_active_health_job(self) -> ProxyHealthJob | None:
         """返回最近创建的活动任务。"""
         async with self._lock:
             active = [
@@ -542,8 +543,8 @@ class InMemoryConsoleProxyStateRepository:
                 for job in self._state.jobs.values()
                 if job.status
                 in {
-                    ConsoleProxyHealthJobStatus.QUEUED,
-                    ConsoleProxyHealthJobStatus.RUNNING,
+                    ProxyHealthJobStatus.QUEUED,
+                    ProxyHealthJobStatus.RUNNING,
                 }
             ]
             return max(active, key=lambda item: item.created_at, default=None)
@@ -554,11 +555,11 @@ class InMemoryConsoleProxyStateRepository:
         owner: str,
         timestamp_ms: int,
         lease_ms: int,
-    ) -> ConsoleProxyHealthJob | None:
+    ) -> ProxyHealthJob | None:
         """认领最早排队或租约已过期的任务。"""
         async with self._lock:
             if any(
-                job.status == ConsoleProxyHealthJobStatus.RUNNING
+                job.status == ProxyHealthJobStatus.RUNNING
                 and (job.lease_expires_at or 0) > timestamp_ms
                 for job in self._state.jobs.values()
             ):
@@ -566,9 +567,9 @@ class InMemoryConsoleProxyStateRepository:
             candidates = [
                 job
                 for job in self._state.jobs.values()
-                if job.status == ConsoleProxyHealthJobStatus.QUEUED
+                if job.status == ProxyHealthJobStatus.QUEUED
                 or (
-                    job.status == ConsoleProxyHealthJobStatus.RUNNING
+                    job.status == ProxyHealthJobStatus.RUNNING
                     and (job.lease_expires_at or 0) <= timestamp_ms
                 )
             ]
@@ -577,7 +578,7 @@ class InMemoryConsoleProxyStateRepository:
             job = min(candidates, key=lambda item: item.created_at)
             claimed = replace(
                 job,
-                status=ConsoleProxyHealthJobStatus.RUNNING,
+                status=ProxyHealthJobStatus.RUNNING,
                 started_at=job.started_at or timestamp_ms,
                 updated_at=timestamp_ms,
                 lease_owner=owner,
@@ -599,7 +600,7 @@ class InMemoryConsoleProxyStateRepository:
             job = self._state.jobs.get(job_id)
             if (
                 job is None
-                or job.status != ConsoleProxyHealthJobStatus.RUNNING
+                or job.status != ProxyHealthJobStatus.RUNNING
                 or job.lease_owner != owner
             ):
                 return False
@@ -613,7 +614,7 @@ class InMemoryConsoleProxyStateRepository:
     async def pending_health_job_items(
         self,
         job_id: str,
-    ) -> list[ConsoleProxyHealthJobItem]:
+    ) -> list[ProxyHealthJobItem]:
         """返回内存任务未完成节点。"""
         async with self._lock:
             return [
@@ -628,7 +629,7 @@ class InMemoryConsoleProxyStateRepository:
         *,
         proxy_id: str,
         generation: int,
-        outcome: ConsoleProxyProbeOutcome,
+        outcome: ProxyProbeOutcome,
         timestamp_ms: int,
     ) -> bool:
         """幂等完成一个内存任务节点。"""
@@ -643,10 +644,10 @@ class InMemoryConsoleProxyStateRepository:
                 outcome=outcome.value,
             )
             field_name = {
-                ConsoleProxyProbeOutcome.HEALTHY: "healthy",
-                ConsoleProxyProbeOutcome.UNHEALTHY: "unhealthy",
-                ConsoleProxyProbeOutcome.INCONCLUSIVE: "inconclusive",
-                ConsoleProxyProbeOutcome.SKIPPED: "skipped",
+                ProxyProbeOutcome.HEALTHY: "healthy",
+                ProxyProbeOutcome.UNHEALTHY: "unhealthy",
+                ProxyProbeOutcome.INCONCLUSIVE: "inconclusive",
+                ProxyProbeOutcome.SKIPPED: "skipped",
             }[outcome]
             self._state.jobs[job_id] = replace(
                 job,
@@ -663,16 +664,16 @@ class InMemoryConsoleProxyStateRepository:
         owner: str,
         timestamp_ms: int,
         error: str = "",
-    ) -> ConsoleProxyHealthJob | None:
+    ) -> ProxyHealthJob | None:
         """结束当前 Worker 持有的任务。"""
         async with self._lock:
             job = self._state.jobs.get(job_id)
             if job is None or job.lease_owner != owner:
                 return None
             status = (
-                ConsoleProxyHealthJobStatus.FAILED
+                ProxyHealthJobStatus.FAILED
                 if error
-                else ConsoleProxyHealthJobStatus.COMPLETED
+                else ProxyHealthJobStatus.COMPLETED
             )
             finished = replace(
                 job,
@@ -704,17 +705,17 @@ class InMemoryConsoleProxyStateRepository:
 
 
 __all__ = [
-    "ConsoleProxyBinding",
-    "ConsoleProxyBindingAssignment",
-    "ConsoleProxyBindingCandidate",
-    "ConsoleProxyHealthJob",
-    "ConsoleProxyHealthJobItem",
-    "ConsoleProxyHealthJobKind",
-    "ConsoleProxyHealthJobStatus",
-    "ConsoleProxyHealthState",
-    "ConsoleProxyProbeOutcome",
-    "ConsoleProxyRuntimeRecord",
-    "ConsoleProxyStateRepository",
-    "ConsoleProxyStateSeed",
-    "InMemoryConsoleProxyStateRepository",
+    "ProxyBinding",
+    "ProxyBindingAssignment",
+    "ProxyBindingCandidate",
+    "ProxyHealthJob",
+    "ProxyHealthJobItem",
+    "ProxyHealthJobKind",
+    "ProxyHealthJobStatus",
+    "ProxyHealthState",
+    "ProxyProbeOutcome",
+    "ProxyRuntimeRecord",
+    "ManagedProxyStateRepository",
+    "ProxyStateSeed",
+    "InMemoryManagedProxyStateRepository",
 ]

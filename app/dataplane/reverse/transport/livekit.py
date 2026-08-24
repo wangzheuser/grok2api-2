@@ -10,7 +10,13 @@ from typing import Any, Dict, Optional
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import UpstreamError
-from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind, ProxyScope, RequestKind
+from app.control.proxy.models import (
+    ProxyFeedback,
+    ProxyFeedbackKind,
+    ProxyLease,
+    ProxyScope,
+    RequestKind,
+)
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.headers import build_ws_headers
 from app.dataplane.reverse.protocol.xai_livekit import (
@@ -34,6 +40,7 @@ async def fetch_livekit_token(
     personality:        str   = "assistant",
     speed:              float = 1.0,
     custom_instruction: str   = "",
+    lease: ProxyLease | None = None,
 ) -> Dict[str, Any]:
     """Fetch a LiveKit session token for *token*.
 
@@ -44,7 +51,20 @@ async def fetch_livekit_token(
     timeout_s = cfg.get_float("voice.timeout", 60.0)
 
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire(scope=ProxyScope.APP, kind=RequestKind.HTTP)
+    if lease is None:
+        lease = await proxy.acquire(
+            token=token,
+            scope=ProxyScope.APP,
+            kind=RequestKind.HTTP,
+            clearance_origin="https://grok.com",
+        )
+    else:
+        lease = await proxy.derive(
+            lease,
+            origin="https://grok.com",
+            scope=ProxyScope.APP,
+            kind=RequestKind.HTTP,
+        )
 
     payload = build_token_request_payload(
         voice              = voice,
@@ -87,6 +107,7 @@ async def connect_livekit_ws(
     access_token:    str,
     *,
     timeout_s:       Optional[float] = None,
+    lease: ProxyLease | None = None,
 ) -> WebSocketConnection:
     """Open a WebSocket connection to the LiveKit RTC endpoint.
 
@@ -105,7 +126,20 @@ async def connect_livekit_ws(
     timeout = timeout_s if timeout_s is not None else cfg.get_float("voice.timeout", 120.0)
 
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire(scope=ProxyScope.APP, kind=RequestKind.WEBSOCKET)
+    if lease is None:
+        lease = await proxy.acquire(
+            token=token,
+            scope=ProxyScope.APP,
+            kind=RequestKind.WEBSOCKET,
+            clearance_origin="https://livekit.grok.com",
+        )
+    else:
+        lease = await proxy.derive(
+            lease,
+            origin="https://livekit.grok.com",
+            scope=ProxyScope.APP,
+            kind=RequestKind.WEBSOCKET,
+        )
 
     url     = build_ws_url(access_token)
     headers = build_ws_headers(token=token, lease=lease)

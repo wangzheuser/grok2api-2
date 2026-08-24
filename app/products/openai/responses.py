@@ -7,6 +7,7 @@ Streaming emits standard Responses API SSE events.
 import asyncio
 from typing import Any, AsyncGenerator
 
+from app.control.account.identity import account_log_key
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError
@@ -15,6 +16,8 @@ from app.platform.tokens import estimate_prompt_tokens, estimate_tokens, estimat
 from app.control.model.enums import ModeId
 from app.control.model.registry import resolve as resolve_model
 from app.control.account.enums import FeedbackKind
+from app.control.proxy.models import ProxyLease
+from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.reverse.protocol.xai_chat import classify_line, StreamAdapter
 from app.products._account_selection import reserve_account, selection_max_retries
 
@@ -301,6 +304,8 @@ async def create(
             collected_annotations: list[dict] = []
 
             try:
+                proxy_runtime = await get_proxy_runtime()
+                proxy_lease = await proxy_runtime.acquire(token=token)
                 try:
                     yield format_sse("response.created", {
                         "type":     "response.created",
@@ -315,6 +320,7 @@ async def create(
                         message   = message,
                         files     = files,
                         timeout_s = timeout_s,
+                        lease     = proxy_lease,
                     ):
                         if tool_calls_emitted:
                             break
@@ -489,7 +495,12 @@ async def create(
                         # Normal text path
                         msg_idx = 1 if reasoning_started else 0
                         for url, img_id in adapter.image_urls:
-                            img_text = await _resolve_image(token, url, img_id)
+                            img_text = await _resolve_image(
+                                token,
+                                url,
+                                img_id,
+                                lease=proxy_lease,
+                            )
                             img_md   = img_text + "\n"
                             text_buf.append(img_md)
                             if message_started:
@@ -589,8 +600,8 @@ async def create(
                     fail_exc = exc
                     if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
                         _retry = True
-                        logger.warning("responses stream retry scheduled: attempt={}/{} status={} token={}...",
-                                       attempt + 1, max_retries, exc.status, token[:8])
+                        logger.warning("responses stream retry scheduled: attempt={}/{} status={} account_key={}",
+                                       attempt + 1, max_retries, exc.status, account_log_key(token))
                     else:
                         logger.warning(
                             "responses stream upstream failed: attempt={}/{} model={} status={} body={}",
@@ -623,6 +634,7 @@ async def create(
     # -------------------------------------------------------------------------
     excluded: list[str] = []
     token    = ""
+    proxy_lease: ProxyLease | None = None
     adapter  = StreamAdapter()
     for attempt in range(max_retries + 1):
         acct, selected_mode_id = await reserve_account(
@@ -641,6 +653,8 @@ async def create(
         adapter  = StreamAdapter()   # fresh adapter per attempt
 
         try:
+            proxy_runtime = await get_proxy_runtime()
+            proxy_lease = await proxy_runtime.acquire(token=token)
             try:
                 async for line in _stream_chat(
                     token     = token,
@@ -648,6 +662,7 @@ async def create(
                     message   = message,
                     files     = files,
                     timeout_s = timeout_s,
+                    lease     = proxy_lease,
                 ):
                     event_type, data = classify_line(line)
                     if event_type == "done":
@@ -667,8 +682,8 @@ async def create(
                 fail_exc = exc
                 if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
                     _retry = True
-                    logger.warning("responses retry scheduled: attempt={}/{} status={} token={}...",
-                                   attempt + 1, max_retries, exc.status, token[:8])
+                    logger.warning("responses retry scheduled: attempt={}/{} status={} account_key={}",
+                                   attempt + 1, max_retries, exc.status, account_log_key(token))
                 else:
                     logger.warning(
                         "responses upstream failed: attempt={}/{} model={} status={} body={}",
@@ -696,7 +711,10 @@ async def create(
     full_text = "".join(adapter.text_buf)
     if adapter.image_urls:
         img_texts = await asyncio.gather(
-            *[_resolve_image(token, url, img_id) for url, img_id in adapter.image_urls],
+            *[
+                _resolve_image(token, url, img_id, lease=proxy_lease)
+                for url, img_id in adapter.image_urls
+            ],
             return_exceptions=True,
         )
         for img_text in img_texts:

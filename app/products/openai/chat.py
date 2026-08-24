@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import orjson
 
+from app.control.account.identity import account_log_key
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError, ValidationError
@@ -22,6 +23,7 @@ from app.control.account.runtime import get_refresh_service
 from app.control.account.invalid_credentials import feedback_kind_for_error
 from app.control.model.registry import resolve as resolve_model
 from app.control.model.enums import ModeId
+from app.control.proxy.models import ProxyLease
 from app.control.account.enums import FeedbackKind
 from app.dataplane.account.selector import current_strategy
 from app.dataplane.proxy import get_proxy_runtime
@@ -98,8 +100,8 @@ async def _quota_sync(token: str, mode_id: int) -> None:
             await svc.refresh_call_async(token, mode_id)
     except Exception as exc:
         logger.warning(
-            "chat quota sync failed: token={}... mode_id={} error={}",
-            token[:10],
+            "chat quota sync failed: account_key={} mode_id={} error={}",
+            account_log_key(token),
             mode_id,
             exc,
         )
@@ -124,8 +126,8 @@ async def _fail_sync(
             ):
                 result = await svc.refresh_on_demand()
                 logger.info(
-                    "account on-demand refresh triggered: token={}... mode_id={} refreshed={} failed={} rate_limited={}",
-                    token[:10],
+                    "account on-demand refresh triggered: account_key={} mode_id={} refreshed={} failed={} rate_limited={}",
+                    account_log_key(token),
                     mode_id,
                     result.refreshed,
                     result.failed,
@@ -133,8 +135,8 @@ async def _fail_sync(
                 )
     except Exception as e:
         logger.warning(
-            "chat fail sync error: token={}... mode_id={} error={}",
-            token[:10],
+            "chat fail sync error: account_key={} mode_id={} error={}",
+            account_log_key(token),
             mode_id,
             e,
         )
@@ -175,13 +177,18 @@ def _feedback_kind(exc: BaseException) -> "FeedbackKind":
     return feedback_kind_for_error(exc)
 
 
-async def _download_image_bytes(token: str, url: str) -> tuple[bytes, str]:
+async def _download_image_bytes(
+    token: str,
+    url: str,
+    *,
+    lease: ProxyLease | None = None,
+) -> tuple[bytes, str]:
     """Download image bytes via the shared asset transport used by /v1/images."""
     from app.dataplane.reverse.protocol.xai_assets import infer_content_type
     from app.dataplane.reverse.transport.assets import download_asset
 
     try:
-        stream, content_type = await download_asset(token, url)
+        stream, content_type = await download_asset(token, url, lease=lease)
         chunks: list[bytes] = []
         async for chunk in stream:
             chunks.append(chunk)
@@ -205,7 +212,13 @@ def _is_imagine_public_url(url: str) -> bool:
     return host.startswith("imagine-public")
 
 
-async def _resolve_image(token: str, url: str, image_id: str) -> str:
+async def _resolve_image(
+    token: str,
+    url: str,
+    image_id: str,
+    *,
+    lease: ProxyLease | None = None,
+) -> str:
     """Return the image embed text for the response body based on image_format config.
 
     Format values:
@@ -231,7 +244,7 @@ async def _resolve_image(token: str, url: str, image_id: str) -> str:
 
     # Formats that require downloading
     try:
-        raw, mime = await _download_image_bytes(token, url)
+        raw, mime = await _download_image_bytes(token, url, lease=lease)
     except Exception as exc:
         logger.warning(
             "chat image download failed: fallback_to=upstream_url error={}", exc
@@ -348,13 +361,22 @@ def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:
     return "\n\n".join(parts), files
 
 
-async def _prepare_file_attachments(token: str, file_inputs: list[str]) -> list[str]:
+async def _prepare_file_attachments(
+    token: str,
+    file_inputs: list[str],
+    *,
+    lease: ProxyLease,
+) -> list[str]:
     """Upload OpenAI-style multimodal inputs and return Grok chat attachment IDs."""
     attachments: list[str] = []
     for file_input in file_inputs:
         if not file_input:
             continue
-        file_id, _file_uri = await upload_from_input(token, file_input)
+        file_id, _file_uri = await upload_from_input(
+            token,
+            file_input,
+            lease=lease,
+        )
         if file_id:
             attachments.append(file_id)
     return attachments
@@ -370,11 +392,13 @@ async def _stream_chat(
     model_config_override: dict | None = None,
     request_overrides: dict | None = None,
     timeout_s: float = 120.0,
+    lease: ProxyLease | None = None,
 ) -> AsyncGenerator[str, None]:
     """Yield MGW JSON frames from the Grok Web Gateway."""
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire()
-    attachments = await _prepare_file_attachments(token, files)
+    if lease is None:
+        lease = await proxy.acquire(token=token)
+    attachments = await _prepare_file_attachments(token, files, lease=lease)
     custom_instruction = get_config().get_str("features.custom_instruction", "").strip()
     prompt = (
         f"[system]: {custom_instruction}\n\n{message}"
@@ -485,6 +509,8 @@ async def completions(
                 collected_annotations: list[dict] = []
 
                 try:
+                    proxy_runtime = await get_proxy_runtime()
+                    proxy_lease = await proxy_runtime.acquire(token=token)
                     try:
                         ended = False
                         sieve = ToolSieve(tool_names)
@@ -498,6 +524,7 @@ async def completions(
                             tool_overrides=tool_overrides,
                             request_overrides=request_overrides,
                             timeout_s=timeout_s,
+                            lease=proxy_lease,
                         ):
                             event_type, data = classify_line(line)
                             if event_type == "done":
@@ -596,7 +623,12 @@ async def completions(
 
                         if not tool_calls_emitted:
                             for url, img_id in adapter.image_urls:
-                                img_text = await _resolve_image(token, url, img_id)
+                                img_text = await _resolve_image(
+                                    token,
+                                    url,
+                                    img_id,
+                                    lease=proxy_lease,
+                                )
                                 chunk = make_stream_chunk(
                                     response_id, model, img_text + "\n"
                                 )
@@ -640,11 +672,11 @@ async def completions(
                         ):
                             _retry = True
                             logger.warning(
-                                "chat stream retry scheduled: attempt={}/{} status={} token={}...",
+                                "chat stream retry scheduled: attempt={}/{} status={} account_key={}",
                                 attempt + 1,
                                 max_retries,
                                 exc.status,
-                                token[:8],
+                                account_log_key(token),
                             )
                         else:
                             logger.warning(
@@ -687,6 +719,7 @@ async def completions(
     # ── Non-streaming path ────────────────────────────────────────────────────
     excluded: list[str] = []
     token = ""
+    proxy_lease: ProxyLease | None = None
     adapter = StreamAdapter()
     for attempt in range(max_retries + 1):
         acct, selected_mode_id = await reserve_account(
@@ -705,6 +738,8 @@ async def completions(
         adapter = StreamAdapter()  # fresh adapter per attempt
 
         try:
+            proxy_runtime = await get_proxy_runtime()
+            proxy_lease = await proxy_runtime.acquire(token=token)
             try:
                 async for line in _stream_chat(
                     token=token,
@@ -714,6 +749,7 @@ async def completions(
                     tool_overrides=tool_overrides,
                     request_overrides=request_overrides,
                     timeout_s=timeout_s,
+                    lease=proxy_lease,
                 ):
                     event_type, data = classify_line(line)
                     if event_type == "done":
@@ -734,11 +770,11 @@ async def completions(
                 if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
                     _retry = True
                     logger.warning(
-                        "chat retry scheduled: attempt={}/{} status={} token={}...",
+                        "chat retry scheduled: attempt={}/{} status={} account_key={}",
                         attempt + 1,
                         max_retries,
                         exc.status,
-                        token[:8],
+                        account_log_key(token),
                     )
                 else:
                     logger.warning(
@@ -777,7 +813,15 @@ async def completions(
     full_text = "".join(adapter.text_buf)
     if adapter.image_urls:
         img_texts = await asyncio.gather(
-            *[_resolve_image(token, url, img_id) for url, img_id in adapter.image_urls],
+            *[
+                _resolve_image(
+                    token,
+                    url,
+                    img_id,
+                    lease=proxy_lease,
+                )
+                for url, img_id in adapter.image_urls
+            ],
             return_exceptions=True,
         )
         for img_text in img_texts:

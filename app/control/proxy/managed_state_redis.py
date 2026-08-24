@@ -1,4 +1,4 @@
-"""Redis Console 代理共享状态仓储。"""
+"""Redis 托管代理共享状态仓储。"""
 
 from __future__ import annotations
 
@@ -9,18 +9,18 @@ from typing import Any
 
 from redis.asyncio import Redis
 
-from .console_state import (
-    ConsoleProxyBinding,
-    ConsoleProxyBindingAssignment,
-    ConsoleProxyBindingCandidate,
-    ConsoleProxyHealthJob,
-    ConsoleProxyHealthJobItem,
-    ConsoleProxyHealthJobKind,
-    ConsoleProxyHealthJobStatus,
-    ConsoleProxyHealthState,
-    ConsoleProxyProbeOutcome,
-    ConsoleProxyRuntimeRecord,
-    ConsoleProxyStateSeed,
+from .managed_state import (
+    ProxyBinding,
+    ProxyBindingAssignment,
+    ProxyBindingCandidate,
+    ProxyHealthJob,
+    ProxyHealthJobItem,
+    ProxyHealthJobKind,
+    ProxyHealthJobStatus,
+    ProxyHealthState,
+    ProxyProbeOutcome,
+    ProxyRuntimeRecord,
+    ProxyStateSeed,
 )
 
 
@@ -125,8 +125,8 @@ return cjson.encode({binding = binding, runtime = selected_runtime})
 """
 
 
-class RedisConsoleProxyStateRepository:
-    """使用 Redis Hash、Lua 和 WATCH 事务共享 Console 代理状态。"""
+class RedisManagedProxyStateRepository:
+    """使用 Redis Hash、Lua 和 WATCH 事务共享托管代理状态。"""
 
     def __init__(self, redis: Redis) -> None:
         self._redis = redis
@@ -136,7 +136,7 @@ class RedisConsoleProxyStateRepository:
 
     async def sync_entries(
         self,
-        entries: list[ConsoleProxyStateSeed],
+        entries: list[ProxyStateSeed],
         *,
         timestamp_ms: int,
     ) -> None:
@@ -156,7 +156,7 @@ class RedisConsoleProxyStateRepository:
                     for proxy_id, seed in seeds.items():
                         runtime = current.get(proxy_id)
                         if runtime is None or runtime.generation != seed.generation:
-                            replacement = ConsoleProxyRuntimeRecord(
+                            replacement = ProxyRuntimeRecord(
                                 proxy_id=proxy_id,
                                 generation=seed.generation,
                                 runtime_epoch=(
@@ -190,25 +190,25 @@ class RedisConsoleProxyStateRepository:
                 except Exception as exc:
                     if exc.__class__.__name__ != "WatchError":
                         raise
-        raise RuntimeError("failed to sync console proxy entries")
+        raise RuntimeError("failed to sync managed proxy entries")
 
-    async def runtime_snapshot(self) -> dict[str, ConsoleProxyRuntimeRecord]:
+    async def runtime_snapshot(self) -> dict[str, ProxyRuntimeRecord]:
         """读取全部 Redis 运行态。"""
         raw = await self._redis.hgetall(_RUNTIMES)
         return {_text(key): _load_runtime(value) for key, value in raw.items()}
 
-    async def get_runtime(self, proxy_id: str) -> ConsoleProxyRuntimeRecord | None:
+    async def get_runtime(self, proxy_id: str) -> ProxyRuntimeRecord | None:
         """读取指定 Redis 运行态。"""
         raw = await self._redis.hget(_RUNTIMES, proxy_id)
         return _load_runtime(raw) if raw else None
 
     async def compare_and_swap_runtime(
         self,
-        expected: ConsoleProxyRuntimeRecord,
-        updated: ConsoleProxyRuntimeRecord,
+        expected: ProxyRuntimeRecord,
+        updated: ProxyRuntimeRecord,
         *,
         clear_bindings: bool = False,
-    ) -> ConsoleProxyRuntimeRecord | None:
+    ) -> ProxyRuntimeRecord | None:
         """使用 Lua 按 generation 和 version 原子更新运行态并解绑。"""
         stored = replace(updated, version=expected.version + 1)
         result = await self._redis.eval(
@@ -227,10 +227,10 @@ class RedisConsoleProxyStateRepository:
     async def acquire_binding(
         self,
         account_key: str,
-        candidates: list[ConsoleProxyBindingCandidate],
+        candidates: list[ProxyBindingCandidate],
         *,
         timestamp_ms: int,
-    ) -> ConsoleProxyBindingAssignment | None:
+    ) -> ProxyBindingAssignment | None:
         """使用 Lua 原子复用或创建账号绑定。"""
         if not candidates:
             return None
@@ -250,8 +250,8 @@ class RedisConsoleProxyStateRepository:
         if not raw:
             return None
         result = _load(raw)
-        return ConsoleProxyBindingAssignment(
-            ConsoleProxyBinding(**result["binding"]),
+        return ProxyBindingAssignment(
+            ProxyBinding(**result["binding"]),
             _load_runtime(json.dumps(result["runtime"])),
         )
 
@@ -290,11 +290,11 @@ class RedisConsoleProxyStateRepository:
     async def create_health_job(
         self,
         *,
-        kind: ConsoleProxyHealthJobKind,
+        kind: ProxyHealthJobKind,
         dedupe_key: str,
-        items: list[ConsoleProxyStateSeed],
+        items: list[ProxyStateSeed],
         timestamp_ms: int,
-    ) -> ConsoleProxyHealthJob:
+    ) -> ProxyHealthJob:
         """使用 WATCH 创建或复用 Redis 活动任务。"""
         unique = {(item.proxy_id, item.generation): item for item in items}
         for _ in range(8):
@@ -305,31 +305,31 @@ class RedisConsoleProxyStateRepository:
                     for raw in raw_jobs:
                         job = _load_job(raw)
                         if job.dedupe_key == dedupe_key and job.status in {
-                            ConsoleProxyHealthJobStatus.QUEUED,
-                            ConsoleProxyHealthJobStatus.RUNNING,
+                            ProxyHealthJobStatus.QUEUED,
+                            ProxyHealthJobStatus.RUNNING,
                         }:
                             await pipe.reset()
                             return job
                     job_id = uuid.uuid4().hex
-                    job = ConsoleProxyHealthJob(
+                    job = ProxyHealthJob(
                         job_id=job_id,
                         kind=kind,
                         dedupe_key=dedupe_key,
-                        status=ConsoleProxyHealthJobStatus.QUEUED,
+                        status=ProxyHealthJobStatus.QUEUED,
                         total=len(unique),
                         created_at=timestamp_ms,
                         updated_at=timestamp_ms,
                     )
                     item_mapping = {
                         proxy_id: _dump_job_item(
-                            ConsoleProxyHealthJobItem(proxy_id, generation)
+                            ProxyHealthJobItem(proxy_id, generation)
                         )
                         for proxy_id, generation in unique
                     }
                     runtime_mapping: dict[str, str] = {}
                     reset_ids: set[str] = set()
                     binding_keys: list[str] = []
-                    if kind == ConsoleProxyHealthJobKind.BOOTSTRAP and unique:
+                    if kind == ProxyHealthJobKind.BOOTSTRAP and unique:
                         identities = list(unique)
                         raw_runtimes = await pipe.hmget(
                             _RUNTIMES,
@@ -346,13 +346,13 @@ class RedisConsoleProxyStateRepository:
                             if (
                                 runtime.generation != generation
                                 or runtime.health_state
-                                != ConsoleProxyHealthState.HEALTHY
+                                != ProxyHealthState.HEALTHY
                             ):
                                 continue
                             runtime_mapping[proxy_id] = _dump_runtime(
                                 replace(
                                     runtime,
-                                    health_state=ConsoleProxyHealthState.UNKNOWN,
+                                    health_state=ProxyHealthState.UNKNOWN,
                                     checking=False,
                                     runtime_epoch=runtime.runtime_epoch + 1,
                                     last_error="",
@@ -386,22 +386,22 @@ class RedisConsoleProxyStateRepository:
                 except Exception as exc:
                     if exc.__class__.__name__ != "WatchError":
                         raise
-        raise RuntimeError("failed to create console proxy health job")
+        raise RuntimeError("failed to create managed proxy health job")
 
-    async def get_health_job(self, job_id: str) -> ConsoleProxyHealthJob | None:
+    async def get_health_job(self, job_id: str) -> ProxyHealthJob | None:
         """读取指定 Redis 健康任务。"""
         raw = await self._redis.hget(_JOBS, job_id)
         return _load_job(raw) if raw else None
 
-    async def get_active_health_job(self) -> ConsoleProxyHealthJob | None:
+    async def get_active_health_job(self) -> ProxyHealthJob | None:
         """读取最近一个 Redis 活动任务。"""
         jobs = [
             _load_job(raw)
             for raw in await self._redis.hvals(_JOBS)
             if _load_job(raw).status
             in {
-                ConsoleProxyHealthJobStatus.QUEUED,
-                ConsoleProxyHealthJobStatus.RUNNING,
+                ProxyHealthJobStatus.QUEUED,
+                ProxyHealthJobStatus.RUNNING,
             }
         ]
         return max(jobs, key=lambda item: item.created_at, default=None)
@@ -412,7 +412,7 @@ class RedisConsoleProxyStateRepository:
         owner: str,
         timestamp_ms: int,
         lease_ms: int,
-    ) -> ConsoleProxyHealthJob | None:
+    ) -> ProxyHealthJob | None:
         """使用 WATCH 认领最早可执行 Redis 任务。"""
         for _ in range(8):
             async with self._redis.pipeline(transaction=True) as pipe:
@@ -420,7 +420,7 @@ class RedisConsoleProxyStateRepository:
                     await pipe.watch(_JOBS)
                     jobs = [_load_job(raw) for raw in await pipe.hvals(_JOBS)]
                     if any(
-                        job.status == ConsoleProxyHealthJobStatus.RUNNING
+                        job.status == ProxyHealthJobStatus.RUNNING
                         and (job.lease_expires_at or 0) > timestamp_ms
                         for job in jobs
                     ):
@@ -429,9 +429,9 @@ class RedisConsoleProxyStateRepository:
                     candidates = [
                         job
                         for job in jobs
-                        if job.status == ConsoleProxyHealthJobStatus.QUEUED
+                        if job.status == ProxyHealthJobStatus.QUEUED
                         or (
-                            job.status == ConsoleProxyHealthJobStatus.RUNNING
+                            job.status == ProxyHealthJobStatus.RUNNING
                             and (job.lease_expires_at or 0) <= timestamp_ms
                         )
                     ]
@@ -441,7 +441,7 @@ class RedisConsoleProxyStateRepository:
                     job = min(candidates, key=lambda item: item.created_at)
                     claimed = replace(
                         job,
-                        status=ConsoleProxyHealthJobStatus.RUNNING,
+                        status=ProxyHealthJobStatus.RUNNING,
                         started_at=job.started_at or timestamp_ms,
                         updated_at=timestamp_ms,
                         lease_owner=owner,
@@ -473,7 +473,7 @@ class RedisConsoleProxyStateRepository:
                     job = _load_job(raw) if raw else None
                     if (
                         job is None
-                        or job.status != ConsoleProxyHealthJobStatus.RUNNING
+                        or job.status != ProxyHealthJobStatus.RUNNING
                         or job.lease_owner != owner
                     ):
                         await pipe.reset()
@@ -495,7 +495,7 @@ class RedisConsoleProxyStateRepository:
     async def pending_health_job_items(
         self,
         job_id: str,
-    ) -> list[ConsoleProxyHealthJobItem]:
+    ) -> list[ProxyHealthJobItem]:
         """读取 Redis 健康任务未完成节点。"""
         return [
             item
@@ -514,7 +514,7 @@ class RedisConsoleProxyStateRepository:
         *,
         proxy_id: str,
         generation: int,
-        outcome: ConsoleProxyProbeOutcome,
+        outcome: ProxyProbeOutcome,
         timestamp_ms: int,
     ) -> bool:
         """使用 WATCH 幂等完成 Redis 任务节点。"""
@@ -536,10 +536,10 @@ class RedisConsoleProxyStateRepository:
                         await pipe.reset()
                         return False
                     field_name = {
-                        ConsoleProxyProbeOutcome.HEALTHY: "healthy",
-                        ConsoleProxyProbeOutcome.UNHEALTHY: "unhealthy",
-                        ConsoleProxyProbeOutcome.INCONCLUSIVE: "inconclusive",
-                        ConsoleProxyProbeOutcome.SKIPPED: "skipped",
+                        ProxyProbeOutcome.HEALTHY: "healthy",
+                        ProxyProbeOutcome.UNHEALTHY: "unhealthy",
+                        ProxyProbeOutcome.INCONCLUSIVE: "inconclusive",
+                        ProxyProbeOutcome.SKIPPED: "skipped",
                     }[outcome]
                     completed = replace(item, completed=True, outcome=outcome.value)
                     updated = replace(
@@ -565,7 +565,7 @@ class RedisConsoleProxyStateRepository:
         owner: str,
         timestamp_ms: int,
         error: str = "",
-    ) -> ConsoleProxyHealthJob | None:
+    ) -> ProxyHealthJob | None:
         """结束当前 Worker 持有的 Redis 任务。"""
         for _ in range(5):
             async with self._redis.pipeline(transaction=True) as pipe:
@@ -579,9 +579,9 @@ class RedisConsoleProxyStateRepository:
                     finished = replace(
                         job,
                         status=(
-                            ConsoleProxyHealthJobStatus.FAILED
+                            ProxyHealthJobStatus.FAILED
                             if error
-                            else ConsoleProxyHealthJobStatus.COMPLETED
+                            else ProxyHealthJobStatus.COMPLETED
                         ),
                         updated_at=timestamp_ms,
                         finished_at=timestamp_ms,
@@ -620,49 +620,49 @@ class RedisConsoleProxyStateRepository:
         await self._redis.aclose()
 
 
-def _dump_runtime(record: ConsoleProxyRuntimeRecord) -> str:
+def _dump_runtime(record: ProxyRuntimeRecord) -> str:
     """序列化运行态。"""
     return _dump(record)
 
 
-def _load_runtime(value: Any) -> ConsoleProxyRuntimeRecord:
+def _load_runtime(value: Any) -> ProxyRuntimeRecord:
     """反序列化运行态。"""
     data = _load(value)
-    data["health_state"] = ConsoleProxyHealthState(data["health_state"])
-    return ConsoleProxyRuntimeRecord(**data)
+    data["health_state"] = ProxyHealthState(data["health_state"])
+    return ProxyRuntimeRecord(**data)
 
 
-def _dump_binding(record: ConsoleProxyBinding) -> str:
+def _dump_binding(record: ProxyBinding) -> str:
     """序列化绑定。"""
     return _dump(record)
 
 
-def _load_binding(value: Any) -> ConsoleProxyBinding:
+def _load_binding(value: Any) -> ProxyBinding:
     """反序列化绑定。"""
-    return ConsoleProxyBinding(**_load(value))
+    return ProxyBinding(**_load(value))
 
 
-def _dump_job(record: ConsoleProxyHealthJob) -> str:
+def _dump_job(record: ProxyHealthJob) -> str:
     """序列化健康任务。"""
     return _dump(record)
 
 
-def _load_job(value: Any) -> ConsoleProxyHealthJob:
+def _load_job(value: Any) -> ProxyHealthJob:
     """反序列化健康任务。"""
     data = _load(value)
-    data["kind"] = ConsoleProxyHealthJobKind(data["kind"])
-    data["status"] = ConsoleProxyHealthJobStatus(data["status"])
-    return ConsoleProxyHealthJob(**data)
+    data["kind"] = ProxyHealthJobKind(data["kind"])
+    data["status"] = ProxyHealthJobStatus(data["status"])
+    return ProxyHealthJob(**data)
 
 
-def _dump_job_item(record: ConsoleProxyHealthJobItem) -> str:
+def _dump_job_item(record: ProxyHealthJobItem) -> str:
     """序列化任务节点。"""
     return _dump(record)
 
 
-def _load_job_item(value: Any) -> ConsoleProxyHealthJobItem:
+def _load_job_item(value: Any) -> ProxyHealthJobItem:
     """反序列化任务节点。"""
-    return ConsoleProxyHealthJobItem(**_load(value))
+    return ProxyHealthJobItem(**_load(value))
 
 
 def _dump(record: Any) -> str:
@@ -684,4 +684,4 @@ def _text(value: Any) -> str:
     return value.decode() if isinstance(value, bytes) else str(value)
 
 
-__all__ = ["RedisConsoleProxyStateRepository"]
+__all__ = ["RedisManagedProxyStateRepository"]

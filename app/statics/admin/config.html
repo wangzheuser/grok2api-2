@@ -518,27 +518,6 @@ const SCHEMA_DEF = [
           { key: 'fast_fail_without_fallback', label: '无 fallback 时快速失败', type: 'bool', desc: '熔断打开且未配置 fallback 时，直接返回 429，避免继续打上游。', showIf: 'console.rate_limit.breaker_enabled' },
         ]
       },
-      {
-        title: 'Console 专用代理池',
-        section: 'console.proxy_pool',
-        fields: [
-          { key: 'enabled', label: '启用 Console 代理池', type: 'bool', desc: '仅影响 console.x.ai 请求；关闭时继续使用全局网络代理配置。' },
-          { key: 'fallback_to_global_proxy', label: '无可用代理时回退全局代理', type: 'bool', desc: '启用后，Console 代理池无可调度代理时回退 proxy.egress；全局出口必须配置固定代理或非空代理池。' },
-          { key: 'max_proxy_retries_per_request', label: '单请求代理重试次数', type: 'number', min: 0, desc: '代理硬失败时，同一账号最多重绑代理重试次数。' },
-          { key: 'challenge_failure_threshold', label: 'Challenge 失败阈值', type: 'number', min: 1, desc: '403 / challenge 软失败达到该次数后才切换代理。' },
-          { key: 'static_cooldown_sec', label: '静态代理冷却（秒）', type: 'number', min: 1, desc: '静态代理连接层失败后的冷却时长。' },
-          { key: 'dynamic_retry_base_sec', label: '动态模板初始退避（秒）', type: 'number', min: 1, desc: 'dynamic_template 代理失败后的初始退避。' },
-          { key: 'dynamic_retry_max_sec', label: '动态模板最大退避（秒）', type: 'number', min: 1, desc: 'dynamic_template 代理连续失败后的最大退避。' },
-          { key: 'dynamic_backoff_factor', label: '动态模板退避因子', type: 'number', min: 1, desc: 'dynamic_template 连续失败退避倍数。' },
-          { key: 'health_check_enabled', label: '启用定时健康检查', type: 'bool', desc: '开启后由后台任务定期检测全部已启用代理。' },
-          { key: 'health_check_url', label: '健康检查 URL', type: 'text', desc: '代理连通性测试访问的地址。' },
-          { key: 'health_check_interval_sec', label: '健康检查间隔（秒）', type: 'number', min: 5, desc: '定时检测全部已启用代理的间隔，最小 5 秒。' },
-          { key: 'health_check_timeout_sec', label: '健康检查超时（秒）', type: 'number', min: 1, desc: '后台手动测试代理的请求超时。' },
-          { key: 'health_check_concurrency', label: '健康检查并发数', type: 'number', min: 1, max: 100, desc: '单个 Worker 执行共享健康任务时的最大并发数。' },
-          { key: 'binding_idle_ttl_sec', label: '绑定闲置清理（秒）', type: 'number', min: 60, desc: '账号 sticky 绑定超过该闲置时间后自动清理，默认 7 天。' },
-          { key: 'proxy_pool_page', label: '代理池管理', type: 'link', href: '/admin/proxies', text: '打开代理池页面', desc: '新增、导入、启停、重置和测试 Console 专用代理。' },
-        ]
-      },
     ]
   },
   {
@@ -600,67 +579,16 @@ const SCHEMA_DEF = [
             type: 'select',
             options: [
               { value: 'direct', label: '直连', labelKey: 'config.schema.options.proxyMode.direct' },
-              { value: 'single_proxy', label: '代理（固定）', labelKey: 'config.schema.options.proxyMode.singleProxy' },
-              { value: 'proxy_pool', label: '代理（轮转）', labelKey: 'config.schema.options.proxyMode.proxyPool' },
+              { value: 'managed_pool', label: '托管代理池', labelKey: 'config.schema.options.proxyMode.managedPool' },
+              { value: 'resin', label: 'Resin', labelKey: 'config.schema.options.proxyMode.resin' },
             ],
-            desc: '控制出站流量代理策略。direct 为直连；single_proxy 使用固定代理；proxy_pool 在代理池中轮转。',
-            descKey: 'config.schema.fields.proxyMode.desc',
+            desc: '全部 Grok、xAI Console、资源、SSE 与 WebSocket 请求共用这一种出口模式。',
           },
           {
             key: 'effective_outlet_preview',
             label: '有效出口预览',
             type: 'outlet_preview',
-            desc: '根据当前页面值显示基础出口、资源下载出口以及 Console 回退是否有效。',
-          },
-          {
-            key: 'proxy_url',
-            label: '基础代理 URL',
-            labelKey: 'config.schema.fields.proxyUrl.label',
-            type: 'text',
-            wide: true,
-            desc: 'API 流量的出站代理地址，支持 http、https、socks5 协议。',
-            descKey: 'config.schema.fields.proxyUrl.desc',
-            showIf: { path: 'proxy.egress.mode', values: ['single_proxy'] },
-          },
-          {
-            key: 'resource_proxy_url',
-            label: '资源代理 URL',
-            labelKey: 'config.schema.fields.resourceProxyUrl.label',
-            type: 'text',
-            wide: true,
-            desc: '图片、视频等媒体资源下载的专用代理地址；留空时回落至基础代理。',
-            descKey: 'config.schema.fields.resourceProxyUrl.desc',
-            showIf: { path: 'proxy.egress.mode', values: ['single_proxy'] },
-          },
-          {
-            key: 'proxy_pool',
-            label: '基础代理池',
-            labelKey: 'config.schema.fields.proxyPool.label',
-            type: 'line_list',
-            desc: 'API 流量代理池，每行一个代理 URL，请求时轮转使用。',
-            descKey: 'config.schema.fields.proxyPool.desc',
-            showIf: { path: 'proxy.egress.mode', values: ['proxy_pool'] },
-          },
-          {
-            key: 'rotation_strategy',
-            label: '轮换策略',
-            type: 'select',
-            options: [
-              { value: 'sticky_failover', label: '故障切换（保持粘性）' },
-              { value: 'round_robin', label: '逐请求轮询' },
-              { value: 'random', label: '随机选择' },
-            ],
-            desc: '故障切换保持当前出口直到失败；逐请求轮询和随机选择会在每次请求时重新选点。',
-            showIf: { path: 'proxy.egress.mode', values: ['proxy_pool'] },
-          },
-          {
-            key: 'resource_proxy_pool',
-            label: '资源代理池',
-            labelKey: 'config.schema.fields.resourceProxyPool.label',
-            type: 'line_list',
-            desc: '媒体资源下载专用代理池，每行一个代理 URL；留空时回落至基础代理池。',
-            descKey: 'config.schema.fields.resourceProxyPool.desc',
-            showIf: { path: 'proxy.egress.mode', values: ['proxy_pool'] },
+            desc: '显示当前唯一生效出口；Resin 与托管池异常时保持失败关闭。',
           },
           {
             key: 'skip_ssl_verify',
@@ -669,7 +597,15 @@ const SCHEMA_DEF = [
             type: 'bool',
             desc: '跳过代理服务器 TLS 证书校验，仅在使用自签名证书的代理时启用。',
             descKey: 'config.schema.fields.skipSslVerify.desc',
-            showIf: { path: 'proxy.egress.mode', values: ['single_proxy', 'proxy_pool'] },
+            showIf: { path: 'proxy.egress.mode', values: ['managed_pool', 'resin'] },
+          },
+          {
+            key: 'proxy_pool_page',
+            label: '代理服务管理',
+            type: 'link',
+            href: '/admin/proxies',
+            text: '打开网络代理池页面',
+            desc: '配置 Resin 模板，管理托管节点，执行批量操作和当前出口检测。',
           },
         ]
       },
@@ -970,7 +906,7 @@ function _evalDisabledWhen(condition) {
 
 // Evaluate a showIf condition.
 // String form: truthy check on config path.  "app.webui_enabled"
-// Object form: value-in-list check.          { path: "proxy.egress.mode", values: ["single_proxy"] }
+// Object form: value-in-list check.          { path: "proxy.egress.mode", values: ["managed_pool"] }
 function _evalShowIf(showIf) {
   if (!showIf) return true;
   const path = typeof showIf === 'string' ? showIf : showIf.path;
@@ -1001,39 +937,6 @@ function _setDirtyValue(fp, value, original = _getByPath(_cfg, fp)) {
   if (same) delete _dirty[fp]; else _dirty[fp] = value;
   const isDirty = fp in _dirty;
   if (wasDirty !== isDirty) _updateDirtyCount(fp, isDirty ? 1 : -1);
-}
-
-function _hasConfiguredGlobalProxy() {
-  const mode = _current('proxy.egress.mode', 'direct');
-  if (mode === 'single_proxy') {
-    return Boolean(String(_current('proxy.egress.proxy_url', '') || '').trim());
-  }
-  if (mode === 'proxy_pool') {
-    const pool = _current('proxy.egress.proxy_pool', []);
-    return Array.isArray(pool) && pool.some(item => String(item || '').trim());
-  }
-  return false;
-}
-
-function _reconcileConsoleProxyFallback(changedPath) {
-  const enabledPath = 'console.proxy_pool.enabled';
-  const fallbackPath = 'console.proxy_pool.fallback_to_global_proxy';
-  const enabled = Boolean(_current('console.proxy_pool.enabled', false));
-  const fallback = Boolean(_current(fallbackPath, false));
-  const explicitEnable = changedPath === fallbackPath && fallback;
-  const enablesConsole = changedPath === enabledPath && enabled && fallback;
-  const changesGlobalEgress = changedPath.startsWith('proxy.egress.') && enabled && fallback;
-  if (
-    _hasConfiguredGlobalProxy()
-    || (!explicitEnable && !enablesConsole && !changesGlobalEgress)
-  ) {
-    return false;
-  }
-  _setDirtyValue(fallbackPath, false, _getByPath(_cfg, fallbackPath) ?? false);
-  const input = document.getElementById('field-console.proxy_pool-fallback_to_global_proxy');
-  if (input) input.checked = false;
-  _refreshRow('console.proxy_pool', 'fallback_to_global_proxy');
-  return true;
 }
 
 // ── Render ──────────────────────────────────────────────────────────────────
@@ -1141,16 +1044,9 @@ function renderInput(field, section, value) {
   const onChange = (v) => {
     const orig = _getValue(section, field.key, field);
     _setDirtyValue(fp, v, orig);
-    const fallbackAutoDisabled = _reconcileConsoleProxyFallback(fp);
     _refreshRow(section, field.key);
-    const changedPaths = fallbackAutoDisabled
-      ? [fp, 'console.proxy_pool.fallback_to_global_proxy']
-      : [fp];
-    _refreshDirtyState({ changedPaths });
+    _refreshDirtyState({ changedPaths: [fp] });
     _refreshOutletPreview();
-    if (fallbackAutoDisabled) {
-      showToast('未配置有效的全局代理，已自动关闭 Console 全局回退', 'info');
-    }
   };
 
   if (field.type === 'bool') {
@@ -1436,29 +1332,9 @@ function _current(path, fallback = '') {
 
 function _effectiveOutletPreview() {
   const mode = _current('proxy.egress.mode', 'direct');
-  const baseUrl = String(_current('proxy.egress.proxy_url', '') || '').trim();
-  const basePool = _current('proxy.egress.proxy_pool', []);
-  const resourceUrl = String(_current('proxy.egress.resource_proxy_url', '') || '').trim();
-  const resourcePool = _current('proxy.egress.resource_proxy_pool', []);
-  let base = '直连';
-  let valid = true;
-  if (mode === 'single_proxy') {
-    valid = !!baseUrl;
-    base = valid ? '固定代理（已配置）' : '固定代理（缺少 URL）';
-  } else if (mode === 'proxy_pool') {
-    const count = Array.isArray(basePool) ? basePool.filter(Boolean).length : 0;
-    valid = count > 0;
-    base = valid ? `基础代理池（${count} 节点）` : '基础代理池（空）';
-  }
-  let resource = '跟随基础出口';
-  if (mode === 'single_proxy' && resourceUrl) resource = '资源固定代理';
-  if (mode === 'proxy_pool' && Array.isArray(resourcePool) && resourcePool.filter(Boolean).length) resource = `资源代理池（${resourcePool.filter(Boolean).length} 节点）`;
-  const consoleEnabled = Boolean(_current('console.proxy_pool.enabled', false));
-  const fallback = Boolean(_current('console.proxy_pool.fallback_to_global_proxy', false));
-  const fallbackText = consoleEnabled && fallback
-    ? (valid && mode !== 'direct' ? 'Console 回退有效' : 'Console 回退无有效代理，将失败关闭')
-    : 'Console 不使用全局回退';
-  return `基础：${base}；资源：${resource}；${fallbackText}`;
+  if (mode === 'managed_pool') return '唯一出口：托管代理池；所有业务链路共用账号粘性节点，节点异常时失败关闭。';
+  if (mode === 'resin') return '唯一出口：Resin；按账号稳定 UUID 连接外部网关，异常时失败关闭。';
+  return '唯一出口：直连；代理库存和 Resin 配置保留但不参与业务调度。';
 }
 
 function _refreshOutletPreview() {
@@ -1491,14 +1367,10 @@ async function doSave() {
 
   try {
     showToast(tr('config.saving', null, '正在保存更改…'), 'info');
-    const result = await _api('POST', '/config', patch);
-    // 重新读取服务端最终配置，确保联动规范化结果与页面一致。
+    await _api('POST', '/config', patch);
+    // 重新读取服务端最终配置，确保页面与热加载后的生效值一致。
     await load();
-    if (result.fallback_auto_disabled) {
-      showToast('更改已保存；因未配置有效全局代理，Console 全局回退已关闭', 'info');
-    } else {
-      showToast(tr('config.saveSuccess', null, '更改已保存'), 'success');
-    }
+    showToast(tr('config.saveSuccess', null, '更改已保存'), 'success');
   } catch (e) {
     showToast(tr('config.saveFailed', { message: e.message }, `保存更改失败: ${e.message}`), 'error');
   }

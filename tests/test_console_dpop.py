@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
-from app.control.proxy.models import ProxyFeedbackKind, ProxyLease
+from app.control.proxy.models import ProxyFeedbackKind, ProxyLease, ProxyProvider
 from app.dataplane.reverse.protocol.xai_console_chat import (
     _classify_console_error_body,
     _post_console_dpop,
@@ -128,13 +128,20 @@ def _lease(**updates) -> ProxyLease:
         "proxy_url": "http://proxy.example:8080",
         "cf_cookies": "cf_clearance=clearance; __cf_bm=bm",
         "user_agent": "Mozilla/5.0 Chrome/136.0.0.0",
-        "proxy_pool": "console",
         "proxy_id": "proxy-1",
         "generation": 2,
         "runtime_epoch": 3,
         "account_key": "account-1",
+        "provider": ProxyProvider.MANAGED_POOL,
     }
     values.update(updates)
+    values.setdefault(
+        "affinity_key",
+        (
+            f"managed:{values['proxy_id']}:{values['generation']}:"
+            f"{values['runtime_epoch']}"
+        ),
+    )
     return ProxyLease(**values)
 
 

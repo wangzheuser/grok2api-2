@@ -4,29 +4,29 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from app.control.proxy.console_state import (
-    ConsoleProxyBindingCandidate,
-    ConsoleProxyHealthJobKind,
-    ConsoleProxyHealthJobStatus,
-    ConsoleProxyHealthState,
-    ConsoleProxyProbeOutcome,
-    ConsoleProxyRuntimeRecord,
-    ConsoleProxyStateSeed,
+from app.control.proxy.managed_state import (
+    ProxyBindingCandidate,
+    ProxyHealthJobKind,
+    ProxyHealthJobStatus,
+    ProxyHealthState,
+    ProxyProbeOutcome,
+    ProxyRuntimeRecord,
+    ProxyStateSeed,
 )
-from app.control.proxy.console_state_local import LocalConsoleProxyStateRepository
+from app.control.proxy.managed_state_local import LocalManagedProxyStateRepository
 
 
-class LocalConsoleProxyStateTests(unittest.IsolatedAsyncioTestCase):
+class LocalManagedProxyStateTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         """为每个用例创建两个指向同一 SQLite 文件的 Worker 仓储。"""
         self._temporary = tempfile.TemporaryDirectory()
         path = Path(self._temporary.name) / "accounts.db"
-        self.first = LocalConsoleProxyStateRepository(path)
-        self.second = LocalConsoleProxyStateRepository(path)
+        self.first = LocalManagedProxyStateRepository(path)
+        self.second = LocalManagedProxyStateRepository(path)
         await self.first.initialize()
         await self.second.initialize()
         await self.first.sync_entries(
-            [ConsoleProxyStateSeed("p1", 0), ConsoleProxyStateSeed("p2", 0)],
+            [ProxyStateSeed("p1", 0), ProxyStateSeed("p2", 0)],
             timestamp_ms=1000,
         )
 
@@ -36,13 +36,13 @@ class LocalConsoleProxyStateTests(unittest.IsolatedAsyncioTestCase):
         await self.second.close()
         self._temporary.cleanup()
 
-    async def _healthy(self, proxy_id: str) -> ConsoleProxyRuntimeRecord:
+    async def _healthy(self, proxy_id: str) -> ProxyRuntimeRecord:
         """把指定节点原子标记为健康。"""
         runtime = await self.first.get_runtime(proxy_id)
         self.assertIsNotNone(runtime)
         stored = await self.first.compare_and_swap_runtime(
             runtime,
-            replace(runtime, health_state=ConsoleProxyHealthState.HEALTHY),
+            replace(runtime, health_state=ProxyHealthState.HEALTHY),
         )
         self.assertIsNotNone(stored)
         return stored
@@ -52,8 +52,8 @@ class LocalConsoleProxyStateTests(unittest.IsolatedAsyncioTestCase):
         await self._healthy("p1")
         await self._healthy("p2")
         candidates = [
-            ConsoleProxyBindingCandidate("p1", 0),
-            ConsoleProxyBindingCandidate("p2", 0),
+            ProxyBindingCandidate("p1", 0),
+            ProxyBindingCandidate("p2", 0),
         ]
 
         first, second = await asyncio.gather(
@@ -69,7 +69,7 @@ class LocalConsoleProxyStateTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_cas_clears_binding_for_other_worker(self):
         """一个 Worker 标记失败并解绑后，另一个 Worker 应立即看见不可调度。"""
         runtime = await self._healthy("p1")
-        candidate = [ConsoleProxyBindingCandidate("p1", 0)]
+        candidate = [ProxyBindingCandidate("p1", 0)]
         assignment = await self.first.acquire_binding(
             "account",
             candidate,
@@ -81,7 +81,7 @@ class LocalConsoleProxyStateTests(unittest.IsolatedAsyncioTestCase):
             runtime,
             replace(
                 runtime,
-                health_state=ConsoleProxyHealthState.COOLING_DOWN,
+                health_state=ProxyHealthState.COOLING_DOWN,
                 runtime_epoch=runtime.runtime_epoch + 1,
                 next_retry_at=5000,
             ),
@@ -103,23 +103,23 @@ class LocalConsoleProxyStateTests(unittest.IsolatedAsyncioTestCase):
         original = await self.first.get_runtime("p1")
         current = await self.first.compare_and_swap_runtime(
             original,
-            replace(original, health_state=ConsoleProxyHealthState.HEALTHY),
+            replace(original, health_state=ProxyHealthState.HEALTHY),
         )
 
         stale = await self.second.compare_and_swap_runtime(
             original,
-            replace(original, health_state=ConsoleProxyHealthState.DEAD),
+            replace(original, health_state=ProxyHealthState.DEAD),
         )
 
         self.assertIsNotNone(current)
         self.assertIsNone(stale)
         visible = await self.second.get_runtime("p1")
-        self.assertEqual(visible.health_state, ConsoleProxyHealthState.HEALTHY)
+        self.assertEqual(visible.health_state, ProxyHealthState.HEALTHY)
 
     async def test_idle_binding_cleanup_uses_last_used_time(self):
         """绑定清理应只删除超过闲置阈值的账号。"""
         await self._healthy("p1")
-        candidate = [ConsoleProxyBindingCandidate("p1", 0)]
+        candidate = [ProxyBindingCandidate("p1", 0)]
         await self.first.acquire_binding("old", candidate, timestamp_ms=1000)
         await self.first.acquire_binding("fresh", candidate, timestamp_ms=3000)
 
@@ -130,9 +130,9 @@ class LocalConsoleProxyStateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_health_job_progress_is_idempotent_and_lease_can_resume(self):
         """任务进度应单调递增，租约过期后由另一个 Worker 续跑未完成项。"""
-        seeds = [ConsoleProxyStateSeed(f"p{index}", 0) for index in range(500)]
+        seeds = [ProxyStateSeed(f"p{index}", 0) for index in range(500)]
         job = await self.first.create_health_job(
-            kind=ConsoleProxyHealthJobKind.MANUAL_ALL,
+            kind=ProxyHealthJobKind.MANUAL_ALL,
             dedupe_key="scope:all",
             items=seeds,
             timestamp_ms=1000,
@@ -161,21 +161,21 @@ class LocalConsoleProxyStateTests(unittest.IsolatedAsyncioTestCase):
             job.job_id,
             proxy_id="p0",
             generation=0,
-            outcome=ConsoleProxyProbeOutcome.HEALTHY,
+            outcome=ProxyProbeOutcome.HEALTHY,
             timestamp_ms=1210,
         )
         duplicate = await self.first.complete_health_job_item(
             job.job_id,
             proxy_id="p0",
             generation=0,
-            outcome=ConsoleProxyProbeOutcome.UNHEALTHY,
+            outcome=ProxyProbeOutcome.UNHEALTHY,
             timestamp_ms=1220,
         )
         snapshot = await self.first.get_health_job(job.job_id)
 
         self.assertTrue(first_count)
         self.assertFalse(duplicate)
-        self.assertEqual(snapshot.status, ConsoleProxyHealthJobStatus.RUNNING)
+        self.assertEqual(snapshot.status, ProxyHealthJobStatus.RUNNING)
         self.assertEqual(snapshot.completed, 1)
         self.assertEqual(snapshot.healthy, 1)
         self.assertEqual(len(await self.first.pending_health_job_items(job.job_id)), 499)
@@ -185,36 +185,36 @@ class LocalConsoleProxyStateTests(unittest.IsolatedAsyncioTestCase):
         healthy = await self._healthy("p1")
         await self.first.acquire_binding(
             "account",
-            [ConsoleProxyBindingCandidate("p1", 0)],
+            [ProxyBindingCandidate("p1", 0)],
             timestamp_ms=1500,
         )
 
         first_job = await self.first.create_health_job(
-            kind=ConsoleProxyHealthJobKind.BOOTSTRAP,
+            kind=ProxyHealthJobKind.BOOTSTRAP,
             dedupe_key="scope:all",
-            items=[ConsoleProxyStateSeed("p1", 0)],
+            items=[ProxyStateSeed("p1", 0)],
             timestamp_ms=2000,
         )
         reset = await self.second.get_runtime("p1")
 
-        self.assertEqual(reset.health_state, ConsoleProxyHealthState.UNKNOWN)
+        self.assertEqual(reset.health_state, ProxyHealthState.UNKNOWN)
         self.assertEqual(reset.runtime_epoch, healthy.runtime_epoch + 1)
         self.assertEqual(await self.second.binding_counts(), {})
 
         restored = await self.second.compare_and_swap_runtime(
             reset,
-            replace(reset, health_state=ConsoleProxyHealthState.HEALTHY),
+            replace(reset, health_state=ProxyHealthState.HEALTHY),
         )
         reused_job = await self.second.create_health_job(
-            kind=ConsoleProxyHealthJobKind.BOOTSTRAP,
+            kind=ProxyHealthJobKind.BOOTSTRAP,
             dedupe_key="scope:all",
-            items=[ConsoleProxyStateSeed("p1", 0)],
+            items=[ProxyStateSeed("p1", 0)],
             timestamp_ms=2100,
         )
         visible = await self.first.get_runtime("p1")
 
         self.assertEqual(reused_job.job_id, first_job.job_id)
-        self.assertEqual(visible.health_state, ConsoleProxyHealthState.HEALTHY)
+        self.assertEqual(visible.health_state, ProxyHealthState.HEALTHY)
         self.assertEqual(visible.runtime_epoch, restored.runtime_epoch)
 
 

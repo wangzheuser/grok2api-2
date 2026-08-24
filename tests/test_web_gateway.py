@@ -297,7 +297,7 @@ class GatewayTransportTests(unittest.IsolatedAsyncioTestCase):
         captured: dict = {}
 
         class _Proxy:
-            async def acquire(self):
+            async def acquire(self, **_kwargs):
                 """返回固定 Web 租约。"""
                 return lease
 

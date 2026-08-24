@@ -8,7 +8,13 @@ import orjson
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import UpstreamError
-from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind, ProxyScope, RequestKind
+from app.control.proxy.models import (
+    ProxyFeedback,
+    ProxyFeedbackKind,
+    ProxyLease,
+    ProxyScope,
+    RequestKind,
+)
 from app.dataplane.reverse.transport._proxy_feedback import upstream_feedback
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.reverse.protocol.xai_video import (
@@ -30,13 +36,27 @@ async def _post_with_proxy(
     label:     str,
     timeout_key: str = "video.timeout",
     referer:   str   = "https://grok.com",
+    lease: ProxyLease | None = None,
 ) -> dict:
-    """Shared helper: acquire proxy → POST JSON → feedback → return body."""
+    """Shared helper: reuse/acquire lease → POST JSON → feedback → return body."""
     cfg       = get_config()
     timeout_s = cfg.get_float(timeout_key, 60.0)
 
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire(scope=ProxyScope.APP, kind=RequestKind.HTTP)
+    if lease is None:
+        lease = await proxy.acquire(
+            token=token,
+            scope=ProxyScope.APP,
+            kind=RequestKind.HTTP,
+            clearance_origin="https://grok.com",
+        )
+    else:
+        lease = await proxy.derive(
+            lease,
+            origin="https://grok.com",
+            scope=ProxyScope.APP,
+            kind=RequestKind.HTTP,
+        )
 
     try:
         result = await post_json(
@@ -79,6 +99,8 @@ async def create_media_post(
     media_url:  str = "",
     prompt:     str = "",
     referer:    str = "https://grok.com/imagine",
+    *,
+    lease: ProxyLease | None = None,
 ) -> dict:
     """POST /rest/media/post/create — create a media post."""
     payload = build_media_post_payload(
@@ -90,24 +112,37 @@ async def create_media_post(
         MEDIA_POST_URL, token, payload,
         label = "create_media_post",
         referer = referer,
+        lease = lease,
     )
 
 
-async def create_media_link(token: str, post_id: str) -> dict:
+async def create_media_link(
+    token: str,
+    post_id: str,
+    *,
+    lease: ProxyLease | None = None,
+) -> dict:
     """POST /rest/media/post/create-link — get a shareable link for a post."""
     payload = build_media_link_payload(post_id)
     return await _post_with_proxy(
         MEDIA_LINK_URL, token, payload,
         label = "create_media_link",
+        lease = lease,
     )
 
 
-async def upscale_video(token: str, video_id: str) -> dict:
+async def upscale_video(
+    token: str,
+    video_id: str,
+    *,
+    lease: ProxyLease | None = None,
+) -> dict:
     """POST /rest/media/video/upscale — upscale a video."""
     payload = build_upscale_payload(video_id)
     return await _post_with_proxy(
         VIDEO_UPSCALE_URL, token, payload,
         label = "upscale_video",
+        lease = lease,
     )
 
 

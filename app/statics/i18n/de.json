@@ -371,8 +371,8 @@
         },
         "proxyMode": {
           "direct": "Direkt",
-          "singleProxy": "Fester Proxy",
-          "proxyPool": "Proxy-Pool"
+          "managedPool": "Verwalteter Proxy-Pool",
+          "resin": "Resin"
         },
         "clearanceMode": {
           "none": "Deaktiviert",
@@ -414,10 +414,6 @@
         "assetListConcurrency": { "label": "Asset-Listen-Konkurrenz" },
         "assetDeleteConcurrency": { "label": "Asset-Lösch-Konkurrenz" },
         "proxyMode": { "label": "Proxy-Modus" },
-        "proxyUrl": { "label": "Primäre Proxy-URL" },
-        "resourceProxyUrl": { "label": "Ressourcen-Proxy-URL" },
-        "proxyPool": { "label": "Primärer Proxy-Pool" },
-        "resourceProxyPool": { "label": "Ressourcen-Proxy-Pool" },
         "skipSslVerify": { "label": "SSL-Prüfung überspringen" },
         "clearanceMode": { "label": "Clearance-Modus" },
         "browserFingerprint": { "label": "Browser-Fingerprint" },

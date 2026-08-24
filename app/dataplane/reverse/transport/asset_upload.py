@@ -19,10 +19,16 @@ from app.platform.net.remote_fetch import fetch_remote_asset
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.headers import build_sso_cookie
 from app.dataplane.proxy.adapters.headers import build_http_headers
-from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+from app.dataplane.proxy.adapters.session import ResettableSession
 from app.dataplane.reverse.protocol.xai_assets import resolve_asset_reference
 from app.control.proxy.feedback import build_feedback
-from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
+from app.control.proxy.models import (
+    ProxyFeedback,
+    ProxyFeedbackKind,
+    ProxyLease,
+    ProxyScope,
+    RequestKind,
+)
 
 _UPLOAD_URL = "https://grok.com/rest/app-chat/upload-file"
 _X_USER_ID_RE = re.compile(r"(?:^|;\s*)x-userid=([^;]+)")
@@ -90,6 +96,8 @@ async def upload_file(
     filename: str,
     mime:     str,
     b64:      str,
+    *,
+    lease: ProxyLease | None = None,
 ) -> tuple[str, str]:
     """Upload base64-encoded file content to Grok.
 
@@ -106,7 +114,13 @@ async def upload_file(
         ``UpstreamError`` on HTTP failure.
     """
     async with _get_upload_sem():
-        return await _upload_file_inner(token, filename, mime, b64)
+        return await _upload_file_inner(
+            token,
+            filename,
+            mime,
+            b64,
+            lease=lease,
+        )
 
 
 async def _upload_file_inner(
@@ -114,12 +128,23 @@ async def _upload_file_inner(
     filename: str,
     mime:     str,
     b64:      str,
+    *,
+    lease: ProxyLease | None = None,
 ) -> tuple[str, str]:
     cfg       = get_config()
     timeout_s = cfg.get_float("asset.upload_timeout", 60.0)
 
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire()
+    owns_lease = lease is None
+    if lease is None:
+        lease = await proxy.acquire(token=token)
+    else:
+        lease = await proxy.derive(
+            lease,
+            origin="https://grok.com",
+            scope=ProxyScope.APP,
+            kind=RequestKind.HTTP,
+        )
 
     payload = orjson.dumps({
         "fileName":     filename,
@@ -127,10 +152,9 @@ async def _upload_file_inner(
         "content":      b64,
     })
     headers = build_http_headers(token, lease=lease)
-    kwargs  = build_session_kwargs(lease=lease)
 
     try:
-        async with ResettableSession(**kwargs) as session:
+        async with ResettableSession(lease=lease) as session:
             response = await session.post(
                 _UPLOAD_URL,
                 headers = headers,
@@ -156,10 +180,11 @@ async def _upload_file_inner(
                 body   = body_text,
             )
 
-        await proxy.feedback(
-            lease,
-            ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200),
-        )
+        if owns_lease:
+            await proxy.feedback(
+                lease,
+                ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200),
+            )
 
         result   = orjson.loads(body_bytes)
         file_id  = result.get("fileMetadataId") or result.get("fileId", "")
@@ -177,7 +202,12 @@ async def _upload_file_inner(
         raise UpstreamError(f"Asset upload transport error: {exc}") from exc
 
 
-async def upload_from_input(token: str, file_input: str) -> tuple[str, str]:
+async def upload_from_input(
+    token: str,
+    file_input: str,
+    *,
+    lease: ProxyLease | None = None,
+) -> tuple[str, str]:
     """High-level helper: parse *file_input* (URL or data URI) and upload.
 
     Returns ``(file_id, file_uri)``.
@@ -186,11 +216,17 @@ async def upload_from_input(token: str, file_input: str) -> tuple[str, str]:
         # 用户 URL 使用独立的受限客户端抓取，不复用上游 Cookie、代理身份或会话。
         remote = await fetch_remote_asset(file_input)
         b64 = base64.b64encode(remote.content).decode()
-        return await upload_file(token, remote.filename, remote.mime_type, b64)
+        return await upload_file(
+            token,
+            remote.filename,
+            remote.mime_type,
+            b64,
+            lease=lease,
+        )
 
     # Data URI
     filename, b64, mime = parse_data_uri(file_input)
-    return await upload_file(token, filename, mime, b64)
+    return await upload_file(token, filename, mime, b64, lease=lease)
 
 
 def resolve_uploaded_asset_reference(token: str, file_id: str, file_uri: str) -> str:

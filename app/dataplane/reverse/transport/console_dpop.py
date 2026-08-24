@@ -165,7 +165,7 @@ def dpop_cache_key(base_url: str, token: str, lease: ProxyLease | None) -> str:
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     if lease is None:
         return f"{normalized_base}|{token_hash}|direct|0|0"
-    proxy_identity = lease.proxy_id or hashlib.sha256((lease.proxy_url or "direct").encode()).hexdigest()[:24]
+    proxy_identity = lease.affinity_key or lease.proxy_id or "direct"
     account_identity = lease.account_key or token_hash
     return "|".join(
         (

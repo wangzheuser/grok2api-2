@@ -1,4 +1,4 @@
-"""Console 专用代理池。"""
+"""统一出口使用的本地托管代理池。"""
 
 from __future__ import annotations
 
@@ -12,10 +12,12 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.control.account.identity import account_key_for_token
 from app.control.proxy.models import (
     ProxyFeedback,
     ProxyFeedbackKind,
     ProxyLease,
+    ProxyProvider,
     ProxyScope,
     RequestKind,
 )
@@ -24,33 +26,32 @@ from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
 
-from .console_state import (
-    ConsoleProxyBindingCandidate,
-    ConsoleProxyHealthJob,
-    ConsoleProxyHealthJobKind,
-    ConsoleProxyHealthState,
-    ConsoleProxyProbeOutcome,
-    ConsoleProxyRuntimeRecord,
-    ConsoleProxyStateRepository,
-    ConsoleProxyStateSeed,
-    InMemoryConsoleProxyStateRepository,
+from .managed_state import (
+    ProxyBindingCandidate,
+    ProxyHealthJob,
+    ProxyHealthJobKind,
+    ProxyHealthState,
+    ProxyProbeOutcome,
+    ProxyRuntimeRecord,
+    ManagedProxyStateRepository,
+    ProxyStateSeed,
+    InMemoryManagedProxyStateRepository,
 )
-from .console_state_factory import create_console_proxy_state_repository
-from .validation import ProxyConfigIssue, validate_egress_config
+from .managed_state_factory import create_managed_proxy_state_repository
 
 
 TIME_PLACEHOLDER = "{time}"
 
 
-class ConsoleProxyMode(StrEnum):
-    """Console 代理模式。"""
+class ProxyEntryMode(StrEnum):
+    """托管代理节点模式。"""
 
     STATIC = "static"
     DYNAMIC_TEMPLATE = "dynamic_template"
 
 
-class ConsoleProxyStatus(StrEnum):
-    """Console 代理后台展示状态。"""
+class ProxyStatus(StrEnum):
+    """托管代理后台展示状态。"""
 
     UNKNOWN = "unknown"
     HEALTHY = "healthy"
@@ -59,14 +60,14 @@ class ConsoleProxyStatus(StrEnum):
     DEAD = "dead"
 
 
-class ConsoleProxyEntry(BaseModel):
-    """Console 代理条目的持久化结构。"""
+class ProxyEntry(BaseModel):
+    """托管代理条目的持久化结构。"""
 
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     url: str
     username: str = ""
     password: str = ""
-    mode: ConsoleProxyMode | str | None = None
+    mode: ProxyEntryMode | str | None = None
     enabled: bool = True
     generation: int = 0
 
@@ -76,12 +77,12 @@ class ConsoleProxyEntry(BaseModel):
         """规范化并校验代理 URL。"""
         text = str(value or "").strip()
         if not text:
-            raise ValueError("proxy url cannot be empty")
+            raise ValueError("代理 URL 为空")
         try:
             parsed = urlsplit(text.replace(TIME_PLACEHOLDER, "0"))
             port = parsed.port
         except ValueError as exc:
-            raise ValueError("invalid proxy url") from exc
+            raise ValueError("代理 URL 格式有误") from exc
         if parsed.scheme.lower() not in {
             "http",
             "https",
@@ -90,11 +91,11 @@ class ConsoleProxyEntry(BaseModel):
             "socks5",
             "socks5h",
         }:
-            raise ValueError("unsupported proxy scheme")
+            raise ValueError("代理协议未受支持")
         if not parsed.hostname:
-            raise ValueError("proxy url must include host")
+            raise ValueError("代理 URL 缺少主机名")
         if port is not None and not 1 <= port <= 65535:
-            raise ValueError("invalid proxy port")
+            raise ValueError("代理端口有误")
         return text
 
     @field_validator("username", "password", mode="before")
@@ -107,15 +108,15 @@ class ConsoleProxyEntry(BaseModel):
     @classmethod
     def _normalize_mode(
         cls,
-        value: ConsoleProxyMode | str | None,
-    ) -> ConsoleProxyMode | None:
+        value: ProxyEntryMode | str | None,
+    ) -> ProxyEntryMode | None:
         """允许旧配置缺失 mode，由运行时推断。"""
         if value in (None, ""):
             return None
-        return ConsoleProxyMode(str(value))
+        return ProxyEntryMode(str(value))
 
     @model_validator(mode="after")
-    def _split_embedded_auth(self) -> "ConsoleProxyEntry":
+    def _split_embedded_auth(self) -> "ProxyEntry":
         """拆分 URL 内嵌认证信息，避免后台接口回显明文密码。"""
         parts = urlsplit(self.url)
         if not parts.username and not parts.password:
@@ -130,16 +131,16 @@ class ConsoleProxyEntry(BaseModel):
         )
         return self
 
-    def inferred_mode(self) -> ConsoleProxyMode:
+    def inferred_mode(self) -> ProxyEntryMode:
         """返回显式 mode 或按模板占位符推断出的 mode。"""
         if self.mode:
-            return ConsoleProxyMode(str(self.mode))
+            return ProxyEntryMode(str(self.mode))
         if any(
             TIME_PLACEHOLDER in value
             for value in (self.url, self.username, self.password)
         ):
-            return ConsoleProxyMode.DYNAMIC_TEMPLATE
-        return ConsoleProxyMode.STATIC
+            return ProxyEntryMode.DYNAMIC_TEMPLATE
+        return ProxyEntryMode.STATIC
 
     def public_dict(self, *, include_secret: bool = False) -> dict[str, Any]:
         """返回可持久化结构，默认不包含明文密码。"""
@@ -157,47 +158,47 @@ class ConsoleProxyEntry(BaseModel):
 
 
 @dataclass(frozen=True, slots=True)
-class ConsoleProxyUpsertResult:
+class ProxyUpsertResult:
     """批量写入代理后的新增、更新和未变化统计。"""
 
-    entries: tuple[ConsoleProxyEntry, ...]
+    entries: tuple[ProxyEntry, ...]
     added: int
     updated: int
     unchanged: int
 
 
 @dataclass(frozen=True, slots=True)
-class ConsoleProxyBatchUpdateResult:
+class ProxyBatchUpdateResult:
     """批量修改代理后的变更条目和计数。"""
 
-    entries: tuple[ConsoleProxyEntry, ...]
+    entries: tuple[ProxyEntry, ...]
     changed: int
     unchanged: int
 
 
 @dataclass(frozen=True, slots=True)
-class _AssignedConsoleProxy:
-    """一次 Console 请求实际分配到的代理。"""
+class _AssignedManagedProxy:
+    """一次业务请求实际分配到的托管代理。"""
 
-    entry: ConsoleProxyEntry
+    entry: ProxyEntry
     proxy_url: str
-    runtime: ConsoleProxyRuntimeRecord
+    runtime: ProxyRuntimeRecord
     account_key: str
 
 
-FallbackLeaseFactory = Callable[..., Awaitable[ProxyLease]]
+LeaseFactory = Callable[..., Awaitable[ProxyLease]]
 
 
-class ConsoleProxyPool:
-    """由共享状态仓储提供账号 sticky 的 Console 专用代理池。"""
+class ManagedProxyPool:
+    """由共享状态仓储提供账号粘性绑定的托管代理池。"""
 
-    def __init__(self, state_repo: ConsoleProxyStateRepository | None = None) -> None:
-        self._state_repo = state_repo or InMemoryConsoleProxyStateRepository()
-        self._entries: list[ConsoleProxyEntry] = []
-        self._config_sig: tuple[Any, ...] | None = None
+    def __init__(self, state_repo: ManagedProxyStateRepository | None = None) -> None:
+        self._state_repo = state_repo or InMemoryManagedProxyStateRepository()
+        self._entries: list[ProxyEntry] = []
+        self._config_entries_ref: object | None = None
 
     @property
-    def state_repository(self) -> ConsoleProxyStateRepository:
+    def state_repository(self) -> ManagedProxyStateRepository:
         """返回健康任务和管理 API 共用的状态仓储。"""
         return self._state_repo
 
@@ -209,83 +210,60 @@ class ConsoleProxyPool:
     async def acquire(
         self,
         *,
-        token: str,
-        fallback_lease_factory: FallbackLeaseFactory,
+        account_key: str = "",
+        lease_factory: LeaseFactory,
         scope: ProxyScope = ProxyScope.APP,
         kind: RequestKind = RequestKind.HTTP,
         clearance_origin: str | None = "https://console.x.ai",
     ) -> ProxyLease:
-        """按严格健康门禁为 Console 请求获取代理租约。"""
-        cfg = get_config()
-        if not cfg.get_bool("console.proxy_pool.enabled", False):
-            return await fallback_lease_factory(
-                scope=scope,
-                kind=kind,
-                clearance_origin=clearance_origin,
-            )
-
+        """按严格健康门禁为业务账号获取托管代理租约。"""
         try:
             await self.load()
-            account_key = account_key_for_token(token)
+            if not account_key:
+                raise ValueError("account key is required")
             assigned = await self._assign(account_key)
         except Exception as exc:
             logger.exception(
-                "console proxy shared state unavailable: error_type={} error={}",
+                "managed proxy shared state unavailable: error_type={} error={}",
                 type(exc).__name__,
                 exc,
             )
             raise UpstreamError(
-                "Console proxy shared state is unavailable",
+                "Managed proxy shared state is unavailable",
                 status=503,
-                code="console_proxy_state_unavailable",
+                code="egress_proxy_state_unavailable",
             ) from exc
 
         if assigned is None:
-            if cfg.get_bool("console.proxy_pool.fallback_to_global_proxy", False):
-                try:
-                    lease = await fallback_lease_factory(
-                        scope=scope,
-                        kind=kind,
-                        clearance_origin=clearance_origin,
-                    )
-                except UpstreamError as exc:
-                    raise UpstreamError(
-                        "No schedulable Console or global proxy",
-                        status=503,
-                        code="console_proxy_unavailable",
-                    ) from exc
-                if not lease.proxy_url:
-                    raise UpstreamError(
-                        "Console proxy fallback cannot use direct egress",
-                        status=503,
-                        code="console_proxy_unavailable",
-                    )
-                lease.proxy_pool = "global"
-                lease.account_key = account_key
-                return lease
             raise UpstreamError(
-                "No schedulable Console proxy",
+                "No schedulable managed proxy",
                 status=503,
-                code="console_proxy_unavailable",
+                code="egress_proxy_unavailable",
             )
 
-        lease = await fallback_lease_factory(
+        lease = await lease_factory(
             scope=scope,
             kind=kind,
             clearance_origin=clearance_origin,
-            proxy_url_override=assigned.proxy_url,
+            proxy_url=assigned.proxy_url,
+            affinity_key=(
+                f"managed:{assigned.entry.id}:{assigned.entry.generation}:"
+                f"{assigned.runtime.runtime_epoch}"
+            ),
+            provider=ProxyProvider.MANAGED_POOL,
+            account_key=assigned.account_key,
         )
-        lease.proxy_pool = "console"
         lease.proxy_id = assigned.entry.id
         lease.proxy_mode = assigned.entry.inferred_mode().value
         lease.generation = assigned.entry.generation
         lease.runtime_epoch = assigned.runtime.runtime_epoch
         lease.account_key = assigned.account_key
+        lease.provider = ProxyProvider.MANAGED_POOL
         return lease
 
     async def feedback(self, lease: ProxyLease, result: ProxyFeedback) -> None:
         """根据请求结果条件更新共享运行态。"""
-        if lease.proxy_pool != "console" or not lease.proxy_id:
+        if lease.provider != ProxyProvider.MANAGED_POOL or not lease.proxy_id:
             return
         if result.kind == ProxyFeedbackKind.SUCCESS:
             await self.mark_success(lease)
@@ -309,13 +287,13 @@ class ConsoleProxyPool:
         if entry is None:
             return False
 
-        def mutate(runtime: ConsoleProxyRuntimeRecord) -> ConsoleProxyRuntimeRecord:
+        def mutate(runtime: ProxyRuntimeRecord) -> ProxyRuntimeRecord:
             epoch = runtime.runtime_epoch
-            if entry.inferred_mode() == ConsoleProxyMode.DYNAMIC_TEMPLATE:
+            if entry.inferred_mode() == ProxyEntryMode.DYNAMIC_TEMPLATE:
                 epoch += 1
             return replace(
                 runtime,
-                health_state=ConsoleProxyHealthState.HEALTHY,
+                health_state=ProxyHealthState.HEALTHY,
                 runtime_epoch=epoch,
                 last_error="",
                 last_failure_at=None,
@@ -342,7 +320,7 @@ class ConsoleProxyPool:
         timestamp_ms = now_ms()
         safe_reason = sanitize_proxy_error(reason, entry)
 
-        def mutate(runtime: ConsoleProxyRuntimeRecord) -> ConsoleProxyRuntimeRecord:
+        def mutate(runtime: ProxyRuntimeRecord) -> ProxyRuntimeRecord:
             return _failed_runtime(
                 entry,
                 runtime,
@@ -360,7 +338,7 @@ class ConsoleProxyPool:
         )
         if updated:
             logger.warning(
-                "console proxy marked failed: proxy_id={} mode={} reason={}",
+                "managed proxy marked failed: proxy_id={} mode={} reason={}",
                 entry.id,
                 entry.inferred_mode().value,
                 safe_reason,
@@ -372,7 +350,7 @@ class ConsoleProxyPool:
         threshold = max(
             2,
             get_config().get_int(
-                "console.proxy_pool.challenge_failure_threshold",
+                "proxy.pool.challenge_failure_threshold",
                 2,
             ),
         )
@@ -402,7 +380,7 @@ class ConsoleProxyPool:
         proxy_id: str,
         *,
         generation: int,
-        outcome: ConsoleProxyProbeOutcome,
+        outcome: ProxyProbeOutcome,
         message: str,
         latency_ms: int,
         status_code: int | None = None,
@@ -425,12 +403,12 @@ class ConsoleProxyPool:
                 "updated_at": timestamp_ms,
             }
             clear_bindings = False
-            if outcome == ConsoleProxyProbeOutcome.HEALTHY:
+            if outcome == ProxyProbeOutcome.HEALTHY:
                 recovery_blocked = (
-                    runtime.health_state == ConsoleProxyHealthState.DEAD
+                    runtime.health_state == ProxyHealthState.DEAD
                     or (
                         runtime.health_state
-                        == ConsoleProxyHealthState.COOLING_DOWN
+                        == ProxyHealthState.COOLING_DOWN
                         and runtime.next_retry_at is not None
                         and runtime.next_retry_at > timestamp_ms
                     )
@@ -444,12 +422,12 @@ class ConsoleProxyPool:
                     )
                 else:
                     was_unhealthy = (
-                        runtime.health_state != ConsoleProxyHealthState.HEALTHY
+                        runtime.health_state != ProxyHealthState.HEALTHY
                     )
                     updated = replace(
                         runtime,
                         **common,
-                        health_state=ConsoleProxyHealthState.HEALTHY,
+                        health_state=ProxyHealthState.HEALTHY,
                         runtime_epoch=(
                             runtime.runtime_epoch + 1
                             if was_unhealthy
@@ -462,7 +440,7 @@ class ConsoleProxyPool:
                         challenge_count=0,
                         health_success_count=runtime.health_success_count + 1,
                     )
-            elif outcome == ConsoleProxyProbeOutcome.UNHEALTHY:
+            elif outcome == ProxyProbeOutcome.UNHEALTHY:
                 updated = replace(
                     _failed_runtime(
                         entry,
@@ -515,26 +493,25 @@ class ConsoleProxyPool:
             and runtime.generation == generation
             and runtime.health_state
             not in {
-                ConsoleProxyHealthState.COOLING_DOWN,
-                ConsoleProxyHealthState.DEAD,
+                ProxyHealthState.COOLING_DOWN,
+                ProxyHealthState.DEAD,
             }
         )
 
     async def load(self) -> None:
         """从热配置加载条目并同步共享运行态身份。"""
         cfg = get_config()
-        raw_entries = cfg.get("console.proxy_pool.entries", []) or []
-        config_sig = tuple(_entry_sig(item) for item in raw_entries)
-        if self._config_sig == config_sig:
+        raw_entries = cfg.get("proxy.pool.entries", []) or []
+        if self._config_entries_ref is raw_entries:
             return
         entries = _deduplicate_entries([_coerce_entry(item) for item in raw_entries])
         await self._state_repo.sync_entries(
-            [ConsoleProxyStateSeed(entry.id, entry.generation) for entry in entries],
+            [ProxyStateSeed(entry.id, entry.generation) for entry in entries],
             timestamp_ms=now_ms(),
         )
         self._entries = entries
-        self._config_sig = config_sig
-        logger.info("console proxy pool loaded: count={}", len(entries))
+        self._config_entries_ref = raw_entries
+        logger.info("managed proxy pool loaded: count={}", len(entries))
 
     async def snapshot(self) -> dict[str, Any]:
         """返回后台展示用代理池、路由和活动任务快照。"""
@@ -556,14 +533,8 @@ class ConsoleProxyPool:
         for row in rows:
             status_counts[row["status"]] = status_counts.get(row["status"], 0) + 1
         status_counts["checking"] = sum(row["checking"] for row in rows)
-        enabled = cfg.get_bool("console.proxy_pool.enabled", False)
-        fallback = cfg.get_bool(
-            "console.proxy_pool.fallback_to_global_proxy",
-            False,
-        )
         return {
-            "enabled": enabled,
-            "fallback_to_global_proxy": fallback,
+            "mode": cfg.get_str("proxy.egress.mode", "direct"),
             "items": rows,
             "binding_count": sum(binding_counts.values()),
             "status_counts": status_counts,
@@ -571,13 +542,13 @@ class ConsoleProxyPool:
             "route": _route_summary(cfg, rows),
         }
 
-    async def replace_entries(self, entries: list[ConsoleProxyEntry]) -> None:
+    async def replace_entries(self, entries: list[ProxyEntry]) -> None:
         """整体保存代理池条目并热加载。"""
         unique_entries = _deduplicate_entries(entries)
         await config.update(
             {
-                "console": {
-                    "proxy_pool": {
+                "proxy": {
+                    "pool": {
                         "entries": [
                             entry.public_dict(include_secret=True)
                             for entry in unique_entries
@@ -587,17 +558,17 @@ class ConsoleProxyPool:
             }
         )
         await config.load()
-        self._config_sig = None
+        self._config_entries_ref = None
         await self.load()
 
     async def add_entries(
         self,
-        entries: list[ConsoleProxyEntry],
-    ) -> ConsoleProxyUpsertResult:
+        entries: list[ProxyEntry],
+    ) -> ProxyUpsertResult:
         """按代理端点身份批量新增或更新条目。"""
         current = await self.entries(include_secret=True)
         positions = {_entry_identity(entry): idx for idx, entry in enumerate(current)}
-        affected: list[ConsoleProxyEntry] = []
+        affected: list[ProxyEntry] = []
         added = 0
         updated = 0
         unchanged = 0
@@ -629,28 +600,28 @@ class ConsoleProxyPool:
             updated += 1
         if added or updated:
             await self.replace_entries(current)
-        return ConsoleProxyUpsertResult(
+        return ProxyUpsertResult(
             entries=tuple(affected),
             added=added,
             updated=updated,
             unchanged=unchanged,
         )
 
-    async def entries(self, *, include_secret: bool = False) -> list[ConsoleProxyEntry]:
+    async def entries(self, *, include_secret: bool = False) -> list[ProxyEntry]:
         """返回当前配置中的去重代理条目。"""
         _ = include_secret
         cfg = get_config()
         return _deduplicate_entries(
             [
                 _coerce_entry(item)
-                for item in (cfg.get("console.proxy_pool.entries", []) or [])
+                for item in (cfg.get("proxy.pool.entries", []) or [])
             ]
         )
 
     async def selected_entries(
         self,
         proxy_ids: list[str],
-    ) -> list[ConsoleProxyEntry]:
+    ) -> list[ProxyEntry]:
         """按请求顺序返回已校验且去重的代理条目。"""
         entries = await self.entries(include_secret=True)
         return _select_entries(entries, proxy_ids)
@@ -659,7 +630,7 @@ class ConsoleProxyPool:
         self,
         proxy_id: str,
         patch: dict[str, Any],
-    ) -> ConsoleProxyEntry:
+    ) -> ProxyEntry:
         """更新指定代理条目并清除旧绑定。"""
         entries = await self.entries(include_secret=True)
         for index, entry in enumerate(entries):
@@ -708,7 +679,7 @@ class ConsoleProxyPool:
         self,
         proxy_id: str,
         enabled: bool,
-    ) -> ConsoleProxyEntry:
+    ) -> ProxyEntry:
         """启用或禁用指定代理。"""
         return await self.update_entry(proxy_id, {"enabled": enabled})
 
@@ -716,13 +687,13 @@ class ConsoleProxyPool:
         self,
         proxy_ids: list[str],
         enabled: bool,
-    ) -> ConsoleProxyBatchUpdateResult:
+    ) -> ProxyBatchUpdateResult:
         """一次持久化启用或禁用多个代理条目。"""
         entries = await self.entries(include_secret=True)
         selected = _select_entries(entries, proxy_ids)
         selected_ids = {entry.id for entry in selected}
-        changed_entries: list[ConsoleProxyEntry] = []
-        next_entries: list[ConsoleProxyEntry] = []
+        changed_entries: list[ProxyEntry] = []
+        next_entries: list[ProxyEntry] = []
         for entry in entries:
             if entry.id not in selected_ids or entry.enabled == enabled:
                 next_entries.append(entry)
@@ -735,7 +706,7 @@ class ConsoleProxyPool:
             changed_entries.append(updated)
         if changed_entries:
             await self.replace_entries(next_entries)
-        return ConsoleProxyBatchUpdateResult(
+        return ProxyBatchUpdateResult(
             entries=tuple(changed_entries),
             changed=len(changed_entries),
             unchanged=len(selected) - len(changed_entries),
@@ -751,7 +722,7 @@ class ConsoleProxyPool:
                 runtime,
                 replace(
                     runtime,
-                    health_state=ConsoleProxyHealthState.UNKNOWN,
+                    health_state=ProxyHealthState.UNKNOWN,
                     checking=False,
                     runtime_epoch=runtime.runtime_epoch + 1,
                     last_error="",
@@ -770,10 +741,10 @@ class ConsoleProxyPool:
     async def reset_entries(
         self,
         proxy_ids: list[str],
-    ) -> tuple[ConsoleProxyEntry, ...]:
+    ) -> tuple[ProxyEntry, ...]:
         """按单节点语义重置多个代理并返回成功条目。"""
         selected = await self.selected_entries(proxy_ids)
-        reset: list[ConsoleProxyEntry] = []
+        reset: list[ProxyEntry] = []
         for entry in selected:
             if await self.reset_entry(entry.id):
                 reset.append(entry)
@@ -793,31 +764,41 @@ class ConsoleProxyPool:
 
     async def create_health_job(
         self,
-        kind: ConsoleProxyHealthJobKind,
-        entries: list[ConsoleProxyEntry] | None = None,
-    ) -> ConsoleProxyHealthJob:
+        kind: ProxyHealthJobKind,
+        entries: list[ProxyEntry] | None = None,
+    ) -> ProxyHealthJob:
         """为给定节点创建或复用异步健康任务。"""
-        selected = (
-            entries
-            if entries is not None
-            else [entry for entry in self._entries if entry.enabled]
-        )
-        identities = sorted((entry.id, entry.generation) for entry in selected)
+        if kind == ProxyHealthJobKind.PROVIDER_MANUAL:
+            identities = [("__effective_egress__", 0)]
+        else:
+            selected = (
+                entries
+                if entries is not None
+                else [entry for entry in self._entries if entry.enabled]
+            )
+            identities = sorted(
+                (entry.id, entry.generation) for entry in selected
+            )
         digest = hashlib.sha256(repr(identities).encode()).hexdigest()[:20]
-        scope = "all" if kind in {
-            ConsoleProxyHealthJobKind.BOOTSTRAP,
-            ConsoleProxyHealthJobKind.PERIODIC,
-            ConsoleProxyHealthJobKind.MANUAL_ALL,
-        } else digest
+        if kind == ProxyHealthJobKind.PROVIDER_MANUAL:
+            scope = "provider"
+        elif kind in {
+            ProxyHealthJobKind.BOOTSTRAP,
+            ProxyHealthJobKind.PERIODIC,
+            ProxyHealthJobKind.MANUAL_ALL,
+        }:
+            scope = "all"
+        else:
+            scope = digest
         return await self._state_repo.create_health_job(
             kind=kind,
             # 同一节点范围只保留一个活动任务，避免 bootstrap、周期和手工检测重叠。
             dedupe_key=f"scope:{scope}",
-            items=[ConsoleProxyStateSeed(*identity) for identity in identities],
+            items=[ProxyStateSeed(*identity) for identity in identities],
             timestamp_ms=now_ms(),
         )
 
-    async def get_health_job(self, job_id: str) -> ConsoleProxyHealthJob | None:
+    async def get_health_job(self, job_id: str) -> ProxyHealthJob | None:
         """返回指定健康任务。"""
         return await self._state_repo.get_health_job(job_id)
 
@@ -827,7 +808,7 @@ class ConsoleProxyPool:
         timestamp_ms = now_ms()
         idle_sec = max(
             60,
-            cfg.get_int("console.proxy_pool.binding_idle_ttl_sec", 604800),
+            cfg.get_int("proxy.pool.binding_idle_ttl_sec", 604800),
         )
         bindings = await self._state_repo.cleanup_bindings(
             cutoff_ms=timestamp_ms - idle_sec * 1000
@@ -837,7 +818,7 @@ class ConsoleProxyPool:
         )
         return bindings, jobs
 
-    async def _assign(self, account_key: str) -> _AssignedConsoleProxy | None:
+    async def _assign(self, account_key: str) -> _AssignedManagedProxy | None:
         """通过共享仓储原子复用或创建账号绑定。"""
         await self.expire_cooldowns()
         timestamp_ms = now_ms()
@@ -845,7 +826,7 @@ class ConsoleProxyPool:
         assignment = await self._state_repo.acquire_binding(
             account_key,
             [
-                ConsoleProxyBindingCandidate(entry.id, entry.generation)
+                ProxyBindingCandidate(entry.id, entry.generation)
                 for entry in entries.values()
             ],
             timestamp_ms=timestamp_ms,
@@ -856,7 +837,7 @@ class ConsoleProxyPool:
         if entry is None or entry.generation != assignment.binding.generation:
             await self._state_repo.clear_bindings(assignment.binding.proxy_id)
             return None
-        return _AssignedConsoleProxy(
+        return _AssignedManagedProxy(
             entry=entry,
             proxy_url=render_proxy_url(entry, timestamp_ms),
             runtime=assignment.runtime,
@@ -869,7 +850,7 @@ class ConsoleProxyPool:
         changed = 0
         for runtime in (await self._state_repo.runtime_snapshot()).values():
             if (
-                runtime.health_state != ConsoleProxyHealthState.COOLING_DOWN
+                runtime.health_state != ProxyHealthState.COOLING_DOWN
                 or runtime.next_retry_at is None
                 or runtime.next_retry_at > timestamp_ms
             ):
@@ -878,7 +859,7 @@ class ConsoleProxyPool:
                 runtime,
                 replace(
                     runtime,
-                    health_state=ConsoleProxyHealthState.UNKNOWN,
+                    health_state=ProxyHealthState.UNKNOWN,
                     checking=False,
                     next_retry_at=None,
                     updated_at=timestamp_ms,
@@ -891,7 +872,7 @@ class ConsoleProxyPool:
     async def _mutate_lease_runtime(
         self,
         lease: ProxyLease,
-        mutate: Callable[[ConsoleProxyRuntimeRecord], ConsoleProxyRuntimeRecord],
+        mutate: Callable[[ProxyRuntimeRecord], ProxyRuntimeRecord],
         *,
         clear_bindings: bool = False,
     ) -> bool:
@@ -910,23 +891,23 @@ class ConsoleProxyPool:
                 return True
         return False
 
-    def _entry_by_id(self, proxy_id: str) -> ConsoleProxyEntry | None:
+    def _entry_by_id(self, proxy_id: str) -> ProxyEntry | None:
         """按稳定 ID 查找代理条目。"""
         return next((entry for entry in self._entries if entry.id == proxy_id), None)
 
     def _snapshot_entry(
         self,
-        entry: ConsoleProxyEntry,
-        runtime: ConsoleProxyRuntimeRecord | None,
+        entry: ProxyEntry,
+        runtime: ProxyRuntimeRecord | None,
         bound_count: int,
     ) -> dict[str, Any]:
         """构建单个代理的后台快照。"""
-        runtime = runtime or ConsoleProxyRuntimeRecord(
+        runtime = runtime or ProxyRuntimeRecord(
             proxy_id=entry.id,
             generation=entry.generation,
         )
         status = (
-            ConsoleProxyStatus.DISABLED.value
+            ProxyStatus.DISABLED.value
             if not entry.enabled
             else runtime.health_state.value
         )
@@ -958,12 +939,6 @@ class ConsoleProxyPool:
         }
 
 
-def account_key_for_token(token: str) -> str:
-    """返回账号 sticky 绑定使用的脱敏 key。"""
-    normalized = token[4:] if token.startswith("sso=") else token
-    return hashlib.sha256(normalized.encode("utf-8", "ignore")).hexdigest()
-
-
 def mask_proxy_url(url: str) -> str:
     """脱敏展示代理 URL。"""
     if not url:
@@ -982,7 +957,7 @@ def mask_proxy_url(url: str) -> str:
         return "<invalid>"
 
 
-def sanitize_proxy_error(message: str, entry: ConsoleProxyEntry | None = None) -> str:
+def sanitize_proxy_error(message: str, entry: ProxyEntry | None = None) -> str:
     """清除错误文本中的代理密码和 URL 内嵌凭据。"""
     text = str(message or "")[:1000]
     text = re.sub(
@@ -995,21 +970,21 @@ def sanitize_proxy_error(message: str, entry: ConsoleProxyEntry | None = None) -
     return text[:300]
 
 
-def parse_proxy_line(line: str) -> ConsoleProxyEntry:
+def parse_proxy_line(line: str) -> ProxyEntry:
     """解析后台批量导入的一行代理配置。"""
     stripped = line.strip()
     if not stripped:
-        raise ValueError("proxy line is empty")
+        raise ValueError("代理行为空")
     return _coerce_entry({"url": stripped})
 
 
-def render_proxy_url(entry: ConsoleProxyEntry, timestamp_ms: int) -> str:
+def render_proxy_url(entry: ProxyEntry, timestamp_ms: int) -> str:
     """渲染本次请求真实使用的代理 URL。"""
     mode = entry.inferred_mode()
 
     def render(value: str) -> str:
         """按动态模板模式替换时间占位符。"""
-        if mode == ConsoleProxyMode.DYNAMIC_TEMPLATE:
+        if mode == ProxyEntryMode.DYNAMIC_TEMPLATE:
             return value.replace(TIME_PLACEHOLDER, str(timestamp_ms))
         return value
 
@@ -1033,41 +1008,41 @@ def render_proxy_url(entry: ConsoleProxyEntry, timestamp_ms: int) -> str:
 
 
 def _failed_runtime(
-    entry: ConsoleProxyEntry,
-    runtime: ConsoleProxyRuntimeRecord,
+    entry: ProxyEntry,
+    runtime: ProxyRuntimeRecord,
     cfg: Any,
     *,
     reason: str,
     timestamp_ms: int,
     count_request: bool,
     dead: bool,
-) -> ConsoleProxyRuntimeRecord:
+) -> ProxyRuntimeRecord:
     """构建硬失败或健康失败后的共享运行态。"""
     failures = runtime.consecutive_failures + 1
     next_retry_at: int | None
     state = (
-        ConsoleProxyHealthState.DEAD
+        ProxyHealthState.DEAD
         if dead
-        else ConsoleProxyHealthState.COOLING_DOWN
+        else ProxyHealthState.COOLING_DOWN
     )
     if dead:
         next_retry_at = None
-    elif entry.inferred_mode() == ConsoleProxyMode.DYNAMIC_TEMPLATE:
-        base = max(1, cfg.get_int("console.proxy_pool.dynamic_retry_base_sec", 60))
+    elif entry.inferred_mode() == ProxyEntryMode.DYNAMIC_TEMPLATE:
+        base = max(1, cfg.get_int("proxy.pool.dynamic_retry_base_sec", 60))
         max_sec = max(
             base,
-            cfg.get_int("console.proxy_pool.dynamic_retry_max_sec", 600),
+            cfg.get_int("proxy.pool.dynamic_retry_max_sec", 600),
         )
         factor = max(
             1.0,
-            cfg.get_float("console.proxy_pool.dynamic_backoff_factor", 2.0),
+            cfg.get_float("proxy.pool.dynamic_backoff_factor", 2.0),
         )
         delay = min(max_sec, int(base * (factor ** max(0, failures - 1))))
         next_retry_at = timestamp_ms + delay * 1000
     else:
         delay = max(
             1,
-            cfg.get_int("console.proxy_pool.static_cooldown_sec", 300),
+            cfg.get_int("proxy.pool.static_cooldown_sec", 300),
         )
         next_retry_at = timestamp_ms + delay * 1000
     return replace(
@@ -1086,7 +1061,7 @@ def _failed_runtime(
 
 
 def _runtime_matches_lease(
-    runtime: ConsoleProxyRuntimeRecord | None,
+    runtime: ProxyRuntimeRecord | None,
     lease: ProxyLease,
 ) -> bool:
     """判断运行态是否仍对应当前请求租约。"""
@@ -1102,11 +1077,10 @@ def _is_proxy_failure(result: ProxyFeedback) -> bool:
     return bool(
         result.kind == ProxyFeedbackKind.TRANSPORT_ERROR
         or result.status_code == 407
-        or result.kind == ProxyFeedbackKind.UNAUTHORIZED
     )
 
 
-def _display_proxy_url(entry: ConsoleProxyEntry) -> str:
+def _display_proxy_url(entry: ProxyEntry) -> str:
     """返回包含脱敏认证信息的代理展示 URL。"""
     if not entry.username:
         return mask_proxy_url(entry.url)
@@ -1134,26 +1108,26 @@ def _proxy_hostport(parts: Any) -> str:
     return f"{host}:{parts.port}" if parts.port else host
 
 
-def _coerce_entry(item: Any) -> ConsoleProxyEntry:
-    """把配置项转换为 ConsoleProxyEntry。"""
-    if isinstance(item, ConsoleProxyEntry):
+def _coerce_entry(item: Any) -> ProxyEntry:
+    """把配置项转换为 ProxyEntry。"""
+    if isinstance(item, ProxyEntry):
         entry = item
     elif isinstance(item, str):
-        entry = ConsoleProxyEntry(id=_stable_entry_id({"url": item}), url=item)
+        entry = ProxyEntry(id=_stable_entry_id({"url": item}), url=item)
     elif isinstance(item, dict):
         data = dict(item)
         if not str(data.get("id") or "").strip():
             data["id"] = _stable_entry_id(data)
-        entry = ConsoleProxyEntry.model_validate(data)
+        entry = ProxyEntry.model_validate(data)
     else:
-        raise ValueError("invalid console proxy entry")
+        raise ValueError("托管代理节点格式有误")
     if entry.mode is None:
         entry.mode = entry.inferred_mode()
     return entry
 
 
 def _entry_identity(
-    entry: ConsoleProxyEntry,
+    entry: ProxyEntry,
 ) -> tuple[str, str, int | None, str, str, str]:
     """生成忽略密码和展示 ID 的代理端点身份。"""
     parts = urlsplit(entry.url.replace(TIME_PLACEHOLDER, "0"))
@@ -1168,9 +1142,9 @@ def _entry_identity(
     )
 
 
-def _deduplicate_entries(entries: list[ConsoleProxyEntry]) -> list[ConsoleProxyEntry]:
+def _deduplicate_entries(entries: list[ProxyEntry]) -> list[ProxyEntry]:
     """按代理端点身份去重，后出现的认证配置覆盖先前配置。"""
-    unique: list[ConsoleProxyEntry] = []
+    unique: list[ProxyEntry] = []
     positions: dict[tuple[str, str, int | None, str, str, str], int] = {}
     for entry in entries:
         identity = _entry_identity(entry)
@@ -1197,16 +1171,10 @@ def _stable_entry_id(data: dict[str, Any]) -> str:
     return "cp_" + hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()[:24]
 
 
-def _entry_sig(item: Any) -> str:
-    """生成热加载配置签名。"""
-    entry = _coerce_entry(item)
-    return repr(entry.public_dict(include_secret=True))
-
-
 def _select_entries(
-    entries: list[ConsoleProxyEntry],
+    entries: list[ProxyEntry],
     proxy_ids: list[str],
-) -> list[ConsoleProxyEntry]:
+) -> list[ProxyEntry]:
     """校验代理 ID 全部存在，并按首次出现顺序返回条目。"""
     unique_ids = list(dict.fromkeys(str(proxy_id).strip() for proxy_id in proxy_ids))
     by_id = {entry.id: entry for entry in entries}
@@ -1216,7 +1184,7 @@ def _select_entries(
     return [by_id[proxy_id] for proxy_id in unique_ids]
 
 
-def _job_dict(job: ConsoleProxyHealthJob) -> dict[str, Any]:
+def _job_dict(job: ProxyHealthJob) -> dict[str, Any]:
     """把共享健康任务转换为管理 API 结构。"""
     return {
         "job_id": job.job_id,
@@ -1238,116 +1206,75 @@ def _job_dict(job: ConsoleProxyHealthJob) -> dict[str, Any]:
 
 def _route_summary(cfg: Any, rows: list[dict[str, Any]]) -> dict[str, Any]:
     """返回不包含代理凭据的有效出口摘要。"""
-    enabled = cfg.get_bool("console.proxy_pool.enabled", False)
-    healthy = sum(row["enabled"] and row["status"] == "healthy" for row in rows)
     mode = cfg.get_str("proxy.egress.mode", "direct")
-    global_valid = True
-    global_configured = False
-    global_count = 0
-    try:
-        validated = validate_egress_config(
-            {
-                "mode": mode,
-                "proxy_url": cfg.get_str("proxy.egress.proxy_url", ""),
-                "proxy_pool": cfg.get_list("proxy.egress.proxy_pool", []),
-                "rotation_strategy": cfg.get_str(
-                    "proxy.egress.rotation_strategy",
-                    "sticky_failover",
-                ),
-                "resource_proxy_url": cfg.get_str(
-                    "proxy.egress.resource_proxy_url",
-                    "",
-                ),
-                "resource_proxy_pool": cfg.get_list(
-                    "proxy.egress.resource_proxy_pool",
-                    [],
-                ),
-            }
-        )
-        global_configured = validated.has_proxy
-        if validated.mode == "single_proxy":
-            global_count = int(validated.has_proxy)
-        elif validated.mode == "proxy_pool":
-            global_count = len(validated.proxy_pool)
-    except ProxyConfigIssue:
-        global_valid = False
-    fallback = cfg.get_bool(
-        "console.proxy_pool.fallback_to_global_proxy",
-        False,
-    )
-    console_fail_closed = enabled and not healthy and not (
-        fallback and global_valid and global_configured
-    )
-    if not enabled and not global_valid:
-        summary = "Console 池 OFF → 全局配置无效，失败关闭"
-    elif not enabled:
-        summary = f"Console 池 OFF → 全局 {mode}"
+    healthy = sum(row["enabled"] and row["status"] == "healthy" for row in rows)
+    resin_configured = bool(cfg.get_str("proxy.resin.url_template", "").strip())
+    if mode == "direct":
+        summary = "统一出口：直连"
+        fail_closed = False
+        available = True
+    elif mode == "resin":
+        summary = "统一出口：Resin" if resin_configured else "Resin 配置缺失 → 失败关闭"
+        fail_closed = True
+        available = resin_configured
     elif healthy:
-        summary = f"Console 池 ON → {healthy} 个健康节点"
-    elif fallback and global_valid and global_configured:
-        summary = f"Console 无健康节点 → 全局 {mode}"
+        summary = f"统一出口：托管代理池（{healthy} 个健康节点）"
+        fail_closed = True
+        available = True
     else:
-        summary = "Console 无健康节点 → 失败关闭"
+        summary = "托管代理池无健康节点 → 失败关闭"
+        fail_closed = True
+        available = False
     return {
         "summary": summary,
-        "console_enabled": enabled,
+        "provider": mode,
         "healthy_count": healthy,
-        "global_mode": mode,
-        "global_valid": global_valid,
-        "global_configured": global_configured,
-        "global_proxy_count": global_count,
-        "egress_fail_closed": not global_valid,
-        "fallback_enabled": fallback,
-        "fallback_result": (
-            "console"
-            if healthy
-            else "global_proxy"
-            if enabled and fallback and global_valid and global_configured
-            else "fail_closed"
-            if enabled
-            else "global"
-        ),
-        "console_fail_closed": console_fail_closed,
-        "fail_closed": console_fail_closed or (not enabled and not global_valid),
+        "resin_configured": resin_configured,
+        "fail_closed": fail_closed,
+        "available": available,
     }
 
 
-_console_proxy_pool: ConsoleProxyPool | None = None
+_managed_proxy_pool: ManagedProxyPool | None = None
 
 
-async def get_console_proxy_pool() -> ConsoleProxyPool:
-    """返回进程内代理池门面，运行态由共享仓储提供。"""
-    global _console_proxy_pool
-    if _console_proxy_pool is None:
-        _console_proxy_pool = ConsoleProxyPool(
-            create_console_proxy_state_repository()
+async def get_managed_proxy_pool() -> ManagedProxyPool:
+    """返回进程内托管代理池门面。"""
+    global _managed_proxy_pool
+    # 首次同步共享运行态前完成旧配置迁移，保留节点 ID、generation 与绑定。
+    from .migration import ensure_proxy_config_migrated
+
+    await ensure_proxy_config_migrated()
+    if _managed_proxy_pool is None:
+        _managed_proxy_pool = ManagedProxyPool(
+            create_managed_proxy_state_repository()
         )
-        await _console_proxy_pool.initialize()
+        await _managed_proxy_pool.initialize()
     else:
-        await _console_proxy_pool.load()
-    return _console_proxy_pool
+        await _managed_proxy_pool.load()
+    return _managed_proxy_pool
 
 
-async def reset_console_proxy_pool_for_tests() -> None:
+async def reset_managed_proxy_pool_for_tests() -> None:
     """重置测试用代理池单例。"""
-    global _console_proxy_pool
-    _console_proxy_pool = ConsoleProxyPool()
-    await _console_proxy_pool.initialize()
+    global _managed_proxy_pool
+    _managed_proxy_pool = ManagedProxyPool()
+    await _managed_proxy_pool.initialize()
 
 
 __all__ = [
-    "ConsoleProxyBatchUpdateResult",
-    "ConsoleProxyEntry",
-    "ConsoleProxyMode",
-    "ConsoleProxyPool",
-    "ConsoleProxyStatus",
-    "ConsoleProxyUpsertResult",
+    "ProxyBatchUpdateResult",
+    "ProxyEntry",
+    "ProxyEntryMode",
+    "ManagedProxyPool",
+    "ProxyStatus",
+    "ProxyUpsertResult",
     "TIME_PLACEHOLDER",
     "account_key_for_token",
-    "get_console_proxy_pool",
+    "get_managed_proxy_pool",
     "mask_proxy_url",
     "parse_proxy_line",
     "render_proxy_url",
-    "reset_console_proxy_pool_for_tests",
+    "reset_managed_proxy_pool_for_tests",
     "sanitize_proxy_error",
 ]

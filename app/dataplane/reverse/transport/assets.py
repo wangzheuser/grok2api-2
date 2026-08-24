@@ -7,7 +7,13 @@ give feedback, and return results to the caller.
 import asyncio
 from typing import Any, AsyncGenerator, Dict, Optional
 
-from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind, ProxyScope, RequestKind
+from app.control.proxy.models import (
+    ProxyFeedback,
+    ProxyFeedbackKind,
+    ProxyLease,
+    ProxyScope,
+    RequestKind,
+)
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.reverse.protocol.xai_assets import (
     ASSETS_LIST_URL,
@@ -52,6 +58,8 @@ def _get_delete_sem() -> asyncio.Semaphore:
 async def list_assets(
     token:  str,
     params: Optional[Dict[str, Any]] = None,
+    *,
+    lease: ProxyLease | None = None,
 ) -> dict:
     """GET /rest/assets and return the JSON response.
 
@@ -60,18 +68,33 @@ async def list_assets(
         params: Optional query parameters (e.g. ``{"cursor": "...", "limit": 50}``).
     """
     async with _get_list_sem():
-        return await _list_assets_inner(token, params)
+        return await _list_assets_inner(token, params, lease=lease)
 
 
 async def _list_assets_inner(
     token:  str,
     params: Optional[Dict[str, Any]] = None,
+    *,
+    lease: ProxyLease | None = None,
 ) -> dict:
     cfg       = get_config()
     timeout_s = cfg.get_float("asset.list_timeout", 30.0)
 
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire(scope=ProxyScope.ASSET, kind=RequestKind.HTTP)
+    if lease is None:
+        lease = await proxy.acquire(
+            token=token,
+            scope=ProxyScope.ASSET,
+            kind=RequestKind.HTTP,
+            clearance_origin="https://grok.com",
+        )
+    else:
+        lease = await proxy.derive(
+            lease,
+            origin="https://grok.com",
+            scope=ProxyScope.ASSET,
+            kind=RequestKind.HTTP,
+        )
 
     try:
         result = await get_json(
@@ -107,18 +130,41 @@ async def _list_assets_inner(
 # Delete asset
 # ------------------------------------------------------------------
 
-async def delete_asset(token: str, asset_id: str) -> dict:
+async def delete_asset(
+    token: str,
+    asset_id: str,
+    *,
+    lease: ProxyLease | None = None,
+) -> dict:
     """DELETE /rest/assets-metadata/{asset_id} and return the JSON body (may be {})."""
     async with _get_delete_sem():
-        return await _delete_asset_inner(token, asset_id)
+        return await _delete_asset_inner(token, asset_id, lease=lease)
 
 
-async def _delete_asset_inner(token: str, asset_id: str) -> dict:
+async def _delete_asset_inner(
+    token: str,
+    asset_id: str,
+    *,
+    lease: ProxyLease | None = None,
+) -> dict:
     cfg       = get_config()
     timeout_s = cfg.get_float("asset.delete_timeout", 30.0)
 
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire(scope=ProxyScope.ASSET, kind=RequestKind.HTTP)
+    if lease is None:
+        lease = await proxy.acquire(
+            token=token,
+            scope=ProxyScope.ASSET,
+            kind=RequestKind.HTTP,
+            clearance_origin="https://grok.com",
+        )
+    else:
+        lease = await proxy.derive(
+            lease,
+            origin="https://grok.com",
+            scope=ProxyScope.ASSET,
+            kind=RequestKind.HTTP,
+        )
 
     try:
         result = await delete_json(
@@ -157,6 +203,8 @@ async def _delete_asset_inner(token: str, asset_id: str) -> dict:
 async def download_asset(
     token:     str,
     file_path: str,
+    *,
+    lease: ProxyLease | None = None,
 ) -> tuple[AsyncGenerator[bytes, None], Optional[str]]:
     """Stream asset bytes from assets.grok.com.
 
@@ -194,12 +242,20 @@ async def download_asset(
     }
 
     proxy = await get_proxy_runtime()
-    # 二进制媒体下载使用资源代理池；列表和删除等元数据请求仍走基础出口。
-    lease = await proxy.acquire(
-        scope=ProxyScope.ASSET,
-        kind=RequestKind.HTTP,
-        resource=True,
-    )
+    if lease is None:
+        lease = await proxy.acquire(
+            token=token,
+            scope=ProxyScope.ASSET,
+            kind=RequestKind.HTTP,
+            clearance_origin="https://assets.grok.com",
+        )
+    else:
+        lease = await proxy.derive(
+            lease,
+            origin="https://assets.grok.com",
+            scope=ProxyScope.ASSET,
+            kind=RequestKind.HTTP,
+        )
 
     try:
         stream = await get_bytes_stream(

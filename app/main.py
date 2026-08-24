@@ -235,28 +235,30 @@ async def lifespan(app: FastAPI):
             _SYNC_IDLE_INTERVAL,
         )
 
-    # 5. Initialise proxy directory and start clearance refresh scheduler.
-    from app.control.proxy import get_proxy_directory
-    from app.control.proxy.console_health import ConsoleProxyHealthScheduler
-    from app.control.proxy.console_pool import get_console_proxy_pool
+    # 5. 初始化统一代理服务及 clearance/托管池健康调度器。
+    from app.control.proxy import get_proxy_service
+    from app.control.proxy.managed_health import ManagedProxyHealthScheduler
     from app.control.proxy.scheduler import ProxyClearanceScheduler
 
-    proxy_dir = await get_proxy_directory()
-    proxy_scheduler = ProxyClearanceScheduler(proxy_dir)
+    proxy_service = await get_proxy_service()
+    proxy_scheduler = ProxyClearanceScheduler(proxy_service.clearance_manager)
     if is_leader:
         proxy_scheduler.start()
-    console_proxy_pool = await get_console_proxy_pool()
-    console_proxy_health_scheduler = ConsoleProxyHealthScheduler(console_proxy_pool)
-    if _config.get_bool("console.proxy_pool.enabled", False):
-        from app.control.proxy.console_state import ConsoleProxyHealthJobKind
+    managed_proxy_pool = proxy_service.managed_pool
+    proxy_health_scheduler = ManagedProxyHealthScheduler(
+        managed_proxy_pool,
+        provider_probe=proxy_service.probe_effective,
+    )
+    if _config.get_str("proxy.egress.mode", "direct") == "managed_pool":
+        from app.control.proxy.managed_state import ProxyHealthJobKind
 
         # 升级后运行态为空时也会复用同范围活动任务，不依赖周期检测开关。
-        await console_proxy_health_scheduler.enqueue(
-            kind=ConsoleProxyHealthJobKind.BOOTSTRAP
+        await proxy_health_scheduler.enqueue(
+            kind=ProxyHealthJobKind.BOOTSTRAP
         )
     # 健康任务通过共享仓储租约选主，所有 Worker 都可接替中断任务。
-    console_proxy_health_scheduler.start()
-    app.state.console_proxy_health_scheduler = console_proxy_health_scheduler
+    proxy_health_scheduler.start()
+    app.state.proxy_health_scheduler = proxy_health_scheduler
 
     # 6. Console 配额窗口自动重置任务（轻量巡检，每30秒扫描一次过期窗口）
     _CONSOLE_RESET_INTERVAL = 30  # 秒
@@ -341,7 +343,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
-    await console_proxy_health_scheduler.stop()
+    await proxy_health_scheduler.stop()
     if is_leader:
         scheduler.stop()
         proxy_scheduler.stop()
@@ -350,7 +352,7 @@ async def lifespan(app: FastAPI):
     set_refresh_scheduler(None)
     set_refresh_scheduler_leader(False)
     set_refresh_service(None)
-    await console_proxy_pool.state_repository.close()
+    await managed_proxy_pool.state_repository.close()
     await repo.close()
     logger.info("application shutdown completed")
 
@@ -410,7 +412,7 @@ def create_app() -> FastAPI:
         },
         {
             "name": "Admin - Proxies",
-            "description": "Admin Console proxy pool management endpoints.",
+            "description": "Admin unified proxy management endpoints.",
         },
         {
             "name": "WebUI - System",

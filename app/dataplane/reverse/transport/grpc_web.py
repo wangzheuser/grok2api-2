@@ -12,7 +12,7 @@ from app.platform.errors import UpstreamError
 from app.platform.net.grpc import GrpcClient
 from app.control.proxy.models import ProxyLease
 from app.dataplane.proxy.adapters.headers import build_http_headers
-from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+from app.dataplane.proxy.adapters.session import ResettableSession
 
 # Headers required by every gRPC-Web call.
 _GRPC_WEB_HEADERS: Dict[str, str] = {
@@ -70,7 +70,7 @@ async def post_grpc_web(
     if session is not None:
         return await _do(session)
 
-    async with ResettableSession(**build_session_kwargs(lease=lease)) as s:
+    async with ResettableSession(lease=lease) as s:
         return await _do(s)
 
 

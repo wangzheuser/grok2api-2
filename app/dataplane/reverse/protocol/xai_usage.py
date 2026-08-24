@@ -4,6 +4,7 @@ import asyncio
 
 import orjson
 
+from app.control.account.identity import account_log_key
 from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
@@ -105,7 +106,7 @@ async def _do_fetch(token: str, mode_name: str) -> dict:
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
 
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire()
+    lease = await proxy.acquire(token=token)
     try:
         body = await post_json(
             "https://grok.com/rest/rate-limits",
@@ -132,15 +133,15 @@ async def _fetch_one(token: str, mode_id: int) -> object | None:
         body = await asyncio.wait_for(_do_fetch(token, mode_name), timeout=25.0)
     except asyncio.TimeoutError:
         logger.debug(
-            "rate-limits fetch timed out: token={}... mode={}", token[:10], mode_name
+            "rate-limits fetch timed out: account_key={} mode={}", account_log_key(token), mode_name
         )
         return None
     except Exception as exc:
         if is_invalid_credentials_error(exc):
             raise
         logger.debug(
-            "rate-limits fetch failed: token={}... mode={} error={}",
-            token[:10],
+            "rate-limits fetch failed: account_key={} mode={} error={}",
+            account_log_key(token),
             mode_name,
             exc,
         )
@@ -152,8 +153,8 @@ async def _fetch_one(token: str, mode_id: int) -> object | None:
     )
     if data is None:
         logger.debug(
-            "rate-limits response missing quota fields: token={}... mode={} body={}",
-            token[:10],
+            "rate-limits response missing quota fields: account_key={} mode={} body={}",
+            account_log_key(token),
             mode_name,
             body,
         )
@@ -229,21 +230,23 @@ def _proxy_feedback_kind_for_error(
     status: int | None,
 ):
     """Map quota-fetch failures to proxy feedback without burning healthy clearance."""
+    from app.control.proxy.feedback import feedback_for_upstream_error
     from app.control.proxy.models import ProxyFeedbackKind
 
     # Invalid or blocked accounts are account problems, not proxy problems.
     if is_invalid_credentials_error(exc):
         return ProxyFeedbackKind.FORBIDDEN
 
-    if status == 429:
-        return ProxyFeedbackKind.RATE_LIMITED
-    if status == 403:
-        return ProxyFeedbackKind.CHALLENGE
-    if status == 401:
-        return ProxyFeedbackKind.UNAUTHORIZED
-    if status and status >= 500:
-        return ProxyFeedbackKind.UPSTREAM_5XX
-    return ProxyFeedbackKind.TRANSPORT_ERROR
+    body = ""
+    code = ""
+    if isinstance(exc, UpstreamError):
+        body = str(exc.details.get("body", ""))
+        code = exc.code
+    return feedback_for_upstream_error(
+        status_code=status,
+        body=body,
+        code=code,
+    ).kind
 
 
 __all__ = [

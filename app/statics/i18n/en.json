@@ -376,8 +376,8 @@
         },
         "proxyMode": {
           "direct": "Direct",
-          "singleProxy": "Fixed Proxy",
-          "proxyPool": "Proxy Pool"
+          "managedPool": "Managed Proxy Pool",
+          "resin": "Resin"
         },
         "clearanceMode": {
           "none": "Disabled",
@@ -517,23 +517,7 @@
         },
         "proxyMode": {
           "label": "Proxy Mode",
-          "desc": "Controls outbound proxy routing. direct sends traffic without a proxy, single_proxy uses a fixed proxy, and proxy_pool rotates across a pool."
-        },
-        "proxyUrl": {
-          "label": "Primary Proxy URL",
-          "desc": "Outbound proxy endpoint for API traffic. Supports http, https, and socks5."
-        },
-        "resourceProxyUrl": {
-          "label": "Resource Proxy URL",
-          "desc": "Dedicated proxy endpoint for downloading images, videos, and other media assets. Falls back to the primary proxy when left blank."
-        },
-        "proxyPool": {
-          "label": "Primary Proxy Pool",
-          "desc": "Pool of outbound proxies for API traffic, one proxy URL per line. Node selection follows the configured rotation strategy."
-        },
-        "resourceProxyPool": {
-          "label": "Resource Proxy Pool",
-          "desc": "Dedicated proxy pool for media downloads, one proxy URL per line. Falls back to the primary pool when left blank."
+          "desc": "All Grok, xAI Console, asset, SSE, and WebSocket requests share one direct, managed-pool, or Resin egress mode."
         },
         "skipSslVerify": {
           "label": "Skip SSL Verification",

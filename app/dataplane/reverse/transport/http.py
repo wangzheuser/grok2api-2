@@ -10,7 +10,7 @@ from app.platform.logging.logger import logger
 from app.platform.errors import UpstreamError
 from app.control.proxy.models import ProxyLease
 from app.dataplane.proxy.adapters.headers import build_http_headers
-from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+from app.dataplane.proxy.adapters.session import ResettableSession
 
 
 async def post_stream(
@@ -35,9 +35,8 @@ async def post_stream(
         referer=referer,
         lease=lease,
     )
-    kwargs = build_session_kwargs(lease=lease)
 
-    session = ResettableSession(**kwargs)
+    session = ResettableSession(lease=lease)
     try:
         response = await session.post(
             url,
@@ -125,7 +124,7 @@ async def post_json(
     if session is not None:
         return await _do(session)
 
-    async with ResettableSession(**build_session_kwargs(lease=lease)) as s:
+    async with ResettableSession(lease=lease) as s:
         return await _do(s)
 
 
@@ -147,9 +146,7 @@ async def get_json(
         referer=referer,
         lease=lease,
     )
-    kwargs = build_session_kwargs(lease=lease)
-
-    async with ResettableSession(**kwargs) as session:
+    async with ResettableSession(lease=lease) as session:
         response = await session.get(
             url,
             headers=headers,
@@ -194,9 +191,7 @@ async def delete_json(
         referer=referer,
         lease=lease,
     )
-    kwargs = build_session_kwargs(lease=lease)
-
-    async with ResettableSession(**kwargs) as session:
+    async with ResettableSession(lease=lease) as session:
         response = await session.delete(
             url,
             headers=headers,
@@ -251,9 +246,8 @@ async def get_bytes_stream(
     if headers.get("Sec-Fetch-Mode") == "navigate":
         headers.pop("Content-Type", None)
         headers.pop("Origin", None)
-    kwargs = build_session_kwargs(lease=lease)
 
-    session = ResettableSession(**kwargs)
+    session = ResettableSession(lease=lease)
     try:
         response = await session.get(
             url,

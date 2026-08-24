@@ -1,25 +1,23 @@
-"""Proxy clearance refresh scheduler.
-
-Periodically refreshes ClearanceBundles for managed (FlareSolverr) mode.
-Previously inline in ProxyDirectory; extracted for separation of concerns.
-"""
+"""统一出口的 Cloudflare clearance 刷新调度器。"""
 
 import asyncio
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
-from app.control.proxy import ProxyDirectory
+from app.control.proxy.clearance import ProxyClearanceManager
 
 
 class ProxyClearanceScheduler:
-    """Periodically refreshes proxy clearance bundles."""
+    """定期刷新统一代理服务维护的 clearance bundle。"""
 
-    def __init__(self, directory: ProxyDirectory) -> None:
-        self._directory = directory
+    def __init__(self, manager: ProxyClearanceManager) -> None:
+        """绑定唯一 clearance 管理器。"""
+        self._manager = manager
         self._task: asyncio.Task | None = None
         self._running = False
 
     def start(self) -> None:
+        """启动后台刷新循环。"""
         if self._running:
             return
         self._running = True
@@ -27,13 +25,15 @@ class ProxyClearanceScheduler:
         logger.info("proxy clearance scheduler started")
 
     def stop(self) -> None:
+        """停止后台刷新循环。"""
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
         logger.info("proxy clearance scheduler stopped")
 
     async def _loop(self) -> None:
-        # Warm up immediately on start so the first request doesn't block.
+        """按当前热配置循环刷新已使用的 bundle。"""
+        # 启动时先加载配置，避免首个业务请求额外执行初始化。
         await self._warm_up()
         while self._running:
             try:
@@ -53,29 +53,25 @@ class ProxyClearanceScheduler:
                 await asyncio.sleep(60)
 
     async def _warm_up(self) -> None:
-        """Pre-fetch clearance bundles without invalidating existing ones."""
+        """加载 clearance 配置；bundle 仍按账号与出口延迟创建。"""
         try:
-            await self._directory.load()
-            await self._directory.warm_up()
+            await self._manager.load()
+            await self._manager.warm_up()
             logger.debug("proxy clearance warm-up completed")
         except Exception as exc:
             logger.warning("proxy clearance warm-up failed: error={}", exc)
 
     async def _refresh(self) -> None:
-        """Build fresh clearance bundles and swap atomically (build-then-swap).
-
-        Old bundles are kept if FlareSolverr is unavailable, so a transient
-        refresh failure never leaves requests without clearance.
-        """
+        """构建新 bundle 后原子替换，刷新异常时保留现有值。"""
         try:
-            await self._directory.load()
-            await self._directory.refresh_clearance_safe()
+            await self._manager.load()
+            await self._manager.refresh_clearance_safe()
             logger.debug("proxy clearance refresh completed")
         except Exception as exc:
             logger.warning("proxy clearance refresh failed: error={}", exc)
 
     def _get_interval(self) -> int:
-        """Return refresh interval in seconds from config."""
+        """返回热配置中的刷新间隔秒数。"""
         cfg = get_config()
         return cfg.get_int("proxy.clearance.refresh_interval", 600)
 

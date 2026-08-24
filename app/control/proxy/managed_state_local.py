@@ -1,4 +1,4 @@
-"""SQLite Console 代理共享状态仓储。"""
+"""SQLite 托管代理共享状态仓储。"""
 
 from __future__ import annotations
 
@@ -10,18 +10,18 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from .console_state import (
-    ConsoleProxyBinding,
-    ConsoleProxyBindingAssignment,
-    ConsoleProxyBindingCandidate,
-    ConsoleProxyHealthJob,
-    ConsoleProxyHealthJobItem,
-    ConsoleProxyHealthJobKind,
-    ConsoleProxyHealthJobStatus,
-    ConsoleProxyHealthState,
-    ConsoleProxyProbeOutcome,
-    ConsoleProxyRuntimeRecord,
-    ConsoleProxyStateSeed,
+from .managed_state import (
+    ProxyBinding,
+    ProxyBindingAssignment,
+    ProxyBindingCandidate,
+    ProxyHealthJob,
+    ProxyHealthJobItem,
+    ProxyHealthJobKind,
+    ProxyHealthJobStatus,
+    ProxyHealthState,
+    ProxyProbeOutcome,
+    ProxyRuntimeRecord,
+    ProxyStateSeed,
 )
 
 
@@ -32,8 +32,8 @@ _JOB_ITEM = "console_proxy_health_job_item"
 _T = TypeVar("_T")
 
 
-class LocalConsoleProxyStateRepository:
-    """使用账户 SQLite 文件共享 Console 代理运行态。"""
+class LocalManagedProxyStateRepository:
+    """使用账户 SQLite 文件共享托管代理运行态。"""
 
     def __init__(self, db_path: Path) -> None:
         self._path = Path(db_path)
@@ -145,7 +145,7 @@ class LocalConsoleProxyStateRepository:
 
     async def sync_entries(
         self,
-        entries: list[ConsoleProxyStateSeed],
+        entries: list[ProxyStateSeed],
         *,
         timestamp_ms: int,
     ) -> None:
@@ -154,7 +154,7 @@ class LocalConsoleProxyStateRepository:
 
     def _sync_entries_sync(
         self,
-        entries: list[ConsoleProxyStateSeed],
+        entries: list[ProxyStateSeed],
         timestamp_ms: int,
     ) -> None:
         """在一个写事务中同步节点身份。"""
@@ -176,7 +176,7 @@ class LocalConsoleProxyStateRepository:
                         (
                             seed.proxy_id,
                             seed.generation,
-                            ConsoleProxyHealthState.UNKNOWN.value,
+                            ProxyHealthState.UNKNOWN.value,
                             timestamp_ms,
                         ),
                     )
@@ -198,7 +198,7 @@ class LocalConsoleProxyStateRepository:
                         """,
                         (
                             seed.generation,
-                            ConsoleProxyHealthState.UNKNOWN.value,
+                            ProxyHealthState.UNKNOWN.value,
                             int(row["runtime_epoch"]) + 1,
                             timestamp_ms,
                             seed.proxy_id,
@@ -219,21 +219,21 @@ class LocalConsoleProxyStateRepository:
                 conn.execute(f"DELETE FROM {_RUNTIME}")
             conn.commit()
 
-    async def runtime_snapshot(self) -> dict[str, ConsoleProxyRuntimeRecord]:
+    async def runtime_snapshot(self) -> dict[str, ProxyRuntimeRecord]:
         """读取全部运行态。"""
         return await self._call(self._runtime_snapshot_sync)
 
-    def _runtime_snapshot_sync(self) -> dict[str, ConsoleProxyRuntimeRecord]:
+    def _runtime_snapshot_sync(self) -> dict[str, ProxyRuntimeRecord]:
         """同步读取全部运行态。"""
         with closing(self._connect()) as conn:
             rows = conn.execute(f"SELECT * FROM {_RUNTIME}").fetchall()
         return {str(row["proxy_id"]): _runtime_from_row(row) for row in rows}
 
-    async def get_runtime(self, proxy_id: str) -> ConsoleProxyRuntimeRecord | None:
+    async def get_runtime(self, proxy_id: str) -> ProxyRuntimeRecord | None:
         """读取指定节点运行态。"""
         return await self._call(self._get_runtime_sync, proxy_id)
 
-    def _get_runtime_sync(self, proxy_id: str) -> ConsoleProxyRuntimeRecord | None:
+    def _get_runtime_sync(self, proxy_id: str) -> ProxyRuntimeRecord | None:
         """同步读取指定节点运行态。"""
         with closing(self._connect()) as conn:
             row = conn.execute(
@@ -244,11 +244,11 @@ class LocalConsoleProxyStateRepository:
 
     async def compare_and_swap_runtime(
         self,
-        expected: ConsoleProxyRuntimeRecord,
-        updated: ConsoleProxyRuntimeRecord,
+        expected: ProxyRuntimeRecord,
+        updated: ProxyRuntimeRecord,
         *,
         clear_bindings: bool = False,
-    ) -> ConsoleProxyRuntimeRecord | None:
+    ) -> ProxyRuntimeRecord | None:
         """按 generation 和 version 原子更新运行态。"""
         return await self._call(
             self._compare_and_swap_runtime_sync,
@@ -259,10 +259,10 @@ class LocalConsoleProxyStateRepository:
 
     def _compare_and_swap_runtime_sync(
         self,
-        expected: ConsoleProxyRuntimeRecord,
-        updated: ConsoleProxyRuntimeRecord,
+        expected: ProxyRuntimeRecord,
+        updated: ProxyRuntimeRecord,
         clear_bindings: bool,
-    ) -> ConsoleProxyRuntimeRecord | None:
+    ) -> ProxyRuntimeRecord | None:
         """同步执行运行态 CAS 和可选解绑。"""
         stored = replace(updated, version=expected.version + 1)
         values = _runtime_update_values(stored)
@@ -296,10 +296,10 @@ class LocalConsoleProxyStateRepository:
     async def acquire_binding(
         self,
         account_key: str,
-        candidates: list[ConsoleProxyBindingCandidate],
+        candidates: list[ProxyBindingCandidate],
         *,
         timestamp_ms: int,
-    ) -> ConsoleProxyBindingAssignment | None:
+    ) -> ProxyBindingAssignment | None:
         """在 SQLite 写事务中原子复用或创建账号绑定。"""
         return await self._call(
             self._acquire_binding_sync,
@@ -311,9 +311,9 @@ class LocalConsoleProxyStateRepository:
     def _acquire_binding_sync(
         self,
         account_key: str,
-        candidates: list[ConsoleProxyBindingCandidate],
+        candidates: list[ProxyBindingCandidate],
         timestamp_ms: int,
-    ) -> ConsoleProxyBindingAssignment | None:
+    ) -> ProxyBindingAssignment | None:
         """同步选择绑定数量最少的健康节点。"""
         candidate_map = {item.proxy_id: item for item in candidates}
         if not candidate_map:
@@ -344,7 +344,7 @@ class LocalConsoleProxyStateRepository:
                     )
                     conn.commit()
                     binding = _binding_from_row(existing)
-                    return ConsoleProxyBindingAssignment(
+                    return ProxyBindingAssignment(
                         replace(binding, last_used_at=timestamp_ms),
                         runtime,
                     )
@@ -376,7 +376,7 @@ class LocalConsoleProxyStateRepository:
                 """,
                 (
                     *ids,
-                    ConsoleProxyHealthState.HEALTHY.value,
+                    ProxyHealthState.HEALTHY.value,
                     timestamp_ms,
                     *generation_args,
                 ),
@@ -396,14 +396,14 @@ class LocalConsoleProxyStateRepository:
                 (account_key, proxy_id, generation, timestamp_ms, timestamp_ms),
             )
             conn.commit()
-            binding = ConsoleProxyBinding(
+            binding = ProxyBinding(
                 account_key=account_key,
                 proxy_id=proxy_id,
                 generation=generation,
                 created_at=timestamp_ms,
                 last_used_at=timestamp_ms,
             )
-            return ConsoleProxyBindingAssignment(binding, _runtime_from_row(row))
+            return ProxyBindingAssignment(binding, _runtime_from_row(row))
 
     async def clear_bindings(self, proxy_id: str | None = None) -> int:
         """清除全部或指定节点绑定。"""
@@ -451,11 +451,11 @@ class LocalConsoleProxyStateRepository:
     async def create_health_job(
         self,
         *,
-        kind: ConsoleProxyHealthJobKind,
+        kind: ProxyHealthJobKind,
         dedupe_key: str,
-        items: list[ConsoleProxyStateSeed],
+        items: list[ProxyStateSeed],
         timestamp_ms: int,
-    ) -> ConsoleProxyHealthJob:
+    ) -> ProxyHealthJob:
         """创建或复用相同范围的活动健康任务。"""
         return await self._call(
             self._create_health_job_sync,
@@ -467,11 +467,11 @@ class LocalConsoleProxyStateRepository:
 
     def _create_health_job_sync(
         self,
-        kind: ConsoleProxyHealthJobKind,
+        kind: ProxyHealthJobKind,
         dedupe_key: str,
-        items: list[ConsoleProxyStateSeed],
+        items: list[ProxyStateSeed],
         timestamp_ms: int,
-    ) -> ConsoleProxyHealthJob:
+    ) -> ProxyHealthJob:
         """同步创建健康任务及节点快照。"""
         unique = {(item.proxy_id, item.generation): item for item in items}
         with closing(self._connect()) as conn:
@@ -484,15 +484,15 @@ class LocalConsoleProxyStateRepository:
                 """,
                 (
                     dedupe_key,
-                    ConsoleProxyHealthJobStatus.QUEUED.value,
-                    ConsoleProxyHealthJobStatus.RUNNING.value,
+                    ProxyHealthJobStatus.QUEUED.value,
+                    ProxyHealthJobStatus.RUNNING.value,
                 ),
             ).fetchone()
             if row is not None:
                 conn.commit()
                 return _job_from_row(row)
 
-            if kind == ConsoleProxyHealthJobKind.BOOTSTRAP and unique:
+            if kind == ProxyHealthJobKind.BOOTSTRAP and unique:
                 # 仅新建 bootstrap 时撤销旧健康状态；活动任务复用路径保持幂等。
                 identities = list(unique)
                 conn.executemany(
@@ -508,11 +508,11 @@ class LocalConsoleProxyStateRepository:
                     """,
                     [
                         (
-                            ConsoleProxyHealthState.UNKNOWN.value,
+                            ProxyHealthState.UNKNOWN.value,
                             timestamp_ms,
                             proxy_id,
                             generation,
-                            ConsoleProxyHealthState.HEALTHY.value,
+                            ProxyHealthState.HEALTHY.value,
                         )
                         for proxy_id, generation in identities
                     ],
@@ -533,7 +533,7 @@ class LocalConsoleProxyStateRepository:
                             generation,
                             proxy_id,
                             generation,
-                            ConsoleProxyHealthState.UNKNOWN.value,
+                            ProxyHealthState.UNKNOWN.value,
                             timestamp_ms,
                         )
                         for proxy_id, generation in identities
@@ -551,7 +551,7 @@ class LocalConsoleProxyStateRepository:
                     job_id,
                     kind.value,
                     dedupe_key,
-                    ConsoleProxyHealthJobStatus.QUEUED.value,
+                    ProxyHealthJobStatus.QUEUED.value,
                     len(unique),
                     timestamp_ms,
                     timestamp_ms,
@@ -568,21 +568,21 @@ class LocalConsoleProxyStateRepository:
                 ],
             )
             conn.commit()
-        return ConsoleProxyHealthJob(
+        return ProxyHealthJob(
             job_id=job_id,
             kind=kind,
             dedupe_key=dedupe_key,
-            status=ConsoleProxyHealthJobStatus.QUEUED,
+            status=ProxyHealthJobStatus.QUEUED,
             total=len(unique),
             created_at=timestamp_ms,
             updated_at=timestamp_ms,
         )
 
-    async def get_health_job(self, job_id: str) -> ConsoleProxyHealthJob | None:
+    async def get_health_job(self, job_id: str) -> ProxyHealthJob | None:
         """读取指定健康任务。"""
         return await self._call(self._get_health_job_sync, job_id)
 
-    def _get_health_job_sync(self, job_id: str) -> ConsoleProxyHealthJob | None:
+    def _get_health_job_sync(self, job_id: str) -> ProxyHealthJob | None:
         """同步读取指定健康任务。"""
         with closing(self._connect()) as conn:
             row = conn.execute(
@@ -591,11 +591,11 @@ class LocalConsoleProxyStateRepository:
             ).fetchone()
         return _job_from_row(row) if row else None
 
-    async def get_active_health_job(self) -> ConsoleProxyHealthJob | None:
+    async def get_active_health_job(self) -> ProxyHealthJob | None:
         """读取最近一个活动健康任务。"""
         return await self._call(self._get_active_health_job_sync)
 
-    def _get_active_health_job_sync(self) -> ConsoleProxyHealthJob | None:
+    def _get_active_health_job_sync(self) -> ProxyHealthJob | None:
         """同步读取最近活动任务。"""
         with closing(self._connect()) as conn:
             row = conn.execute(
@@ -605,8 +605,8 @@ class LocalConsoleProxyStateRepository:
                 ORDER BY created_at DESC LIMIT 1
                 """,
                 (
-                    ConsoleProxyHealthJobStatus.QUEUED.value,
-                    ConsoleProxyHealthJobStatus.RUNNING.value,
+                    ProxyHealthJobStatus.QUEUED.value,
+                    ProxyHealthJobStatus.RUNNING.value,
                 ),
             ).fetchone()
         return _job_from_row(row) if row else None
@@ -617,7 +617,7 @@ class LocalConsoleProxyStateRepository:
         owner: str,
         timestamp_ms: int,
         lease_ms: int,
-    ) -> ConsoleProxyHealthJob | None:
+    ) -> ProxyHealthJob | None:
         """认领排队中或租约已过期的任务。"""
         return await self._call(
             self._claim_health_job_sync,
@@ -631,7 +631,7 @@ class LocalConsoleProxyStateRepository:
         owner: str,
         timestamp_ms: int,
         lease_ms: int,
-    ) -> ConsoleProxyHealthJob | None:
+    ) -> ProxyHealthJob | None:
         """同步认领最早可执行任务。"""
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -641,7 +641,7 @@ class LocalConsoleProxyStateRepository:
                 WHERE status = ? AND COALESCE(lease_expires_at, 0) > ?
                 LIMIT 1
                 """,
-                (ConsoleProxyHealthJobStatus.RUNNING.value, timestamp_ms),
+                (ProxyHealthJobStatus.RUNNING.value, timestamp_ms),
             ).fetchone()
             if active is not None:
                 conn.commit()
@@ -654,8 +654,8 @@ class LocalConsoleProxyStateRepository:
                 ORDER BY created_at ASC LIMIT 1
                 """,
                 (
-                    ConsoleProxyHealthJobStatus.QUEUED.value,
-                    ConsoleProxyHealthJobStatus.RUNNING.value,
+                    ProxyHealthJobStatus.QUEUED.value,
+                    ProxyHealthJobStatus.RUNNING.value,
                     timestamp_ms,
                 ),
             ).fetchone()
@@ -671,7 +671,7 @@ class LocalConsoleProxyStateRepository:
                 WHERE job_id = ?
                 """,
                 (
-                    ConsoleProxyHealthJobStatus.RUNNING.value,
+                    ProxyHealthJobStatus.RUNNING.value,
                     started_at,
                     timestamp_ms,
                     owner,
@@ -682,7 +682,7 @@ class LocalConsoleProxyStateRepository:
             conn.commit()
         return replace(
             _job_from_row(row),
-            status=ConsoleProxyHealthJobStatus.RUNNING,
+            status=ProxyHealthJobStatus.RUNNING,
             started_at=int(started_at),
             updated_at=timestamp_ms,
             lease_owner=owner,
@@ -725,7 +725,7 @@ class LocalConsoleProxyStateRepository:
                     timestamp_ms,
                     timestamp_ms + lease_ms,
                     job_id,
-                    ConsoleProxyHealthJobStatus.RUNNING.value,
+                    ProxyHealthJobStatus.RUNNING.value,
                     owner,
                 ),
             )
@@ -735,14 +735,14 @@ class LocalConsoleProxyStateRepository:
     async def pending_health_job_items(
         self,
         job_id: str,
-    ) -> list[ConsoleProxyHealthJobItem]:
+    ) -> list[ProxyHealthJobItem]:
         """读取健康任务尚未完成的节点。"""
         return await self._call(self._pending_health_job_items_sync, job_id)
 
     def _pending_health_job_items_sync(
         self,
         job_id: str,
-    ) -> list[ConsoleProxyHealthJobItem]:
+    ) -> list[ProxyHealthJobItem]:
         """同步读取未完成任务节点。"""
         with closing(self._connect()) as conn:
             rows = conn.execute(
@@ -757,7 +757,7 @@ class LocalConsoleProxyStateRepository:
         *,
         proxy_id: str,
         generation: int,
-        outcome: ConsoleProxyProbeOutcome,
+        outcome: ProxyProbeOutcome,
         timestamp_ms: int,
     ) -> bool:
         """幂等完成一个健康任务节点并更新计数。"""
@@ -775,15 +775,15 @@ class LocalConsoleProxyStateRepository:
         job_id: str,
         proxy_id: str,
         generation: int,
-        outcome: ConsoleProxyProbeOutcome,
+        outcome: ProxyProbeOutcome,
         timestamp_ms: int,
     ) -> bool:
         """同步完成任务节点。"""
         counter = {
-            ConsoleProxyProbeOutcome.HEALTHY: "healthy",
-            ConsoleProxyProbeOutcome.UNHEALTHY: "unhealthy",
-            ConsoleProxyProbeOutcome.INCONCLUSIVE: "inconclusive",
-            ConsoleProxyProbeOutcome.SKIPPED: "skipped",
+            ProxyProbeOutcome.HEALTHY: "healthy",
+            ProxyProbeOutcome.UNHEALTHY: "unhealthy",
+            ProxyProbeOutcome.INCONCLUSIVE: "inconclusive",
+            ProxyProbeOutcome.SKIPPED: "skipped",
         }[outcome]
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -818,7 +818,7 @@ class LocalConsoleProxyStateRepository:
         owner: str,
         timestamp_ms: int,
         error: str = "",
-    ) -> ConsoleProxyHealthJob | None:
+    ) -> ProxyHealthJob | None:
         """完成或标记失败当前 Worker 持有的任务。"""
         return await self._call(
             self._finish_health_job_sync,
@@ -834,12 +834,12 @@ class LocalConsoleProxyStateRepository:
         owner: str,
         timestamp_ms: int,
         error: str,
-    ) -> ConsoleProxyHealthJob | None:
+    ) -> ProxyHealthJob | None:
         """同步结束任务并返回最新快照。"""
         status = (
-            ConsoleProxyHealthJobStatus.FAILED
+            ProxyHealthJobStatus.FAILED
             if error
-            else ConsoleProxyHealthJobStatus.COMPLETED
+            else ProxyHealthJobStatus.COMPLETED
         )
         with closing(self._connect()) as conn:
             cursor = conn.execute(
@@ -878,12 +878,12 @@ class LocalConsoleProxyStateRepository:
         """SQLite 仓储每次操作使用短连接，无需关闭。"""
 
 
-def _runtime_from_row(row: Any) -> ConsoleProxyRuntimeRecord:
+def _runtime_from_row(row: Any) -> ProxyRuntimeRecord:
     """把 SQLite 行转换为运行态模型。"""
-    return ConsoleProxyRuntimeRecord(
+    return ProxyRuntimeRecord(
         proxy_id=str(row["proxy_id"]),
         generation=int(row["generation"]),
-        health_state=ConsoleProxyHealthState(str(row["health_state"])),
+        health_state=ProxyHealthState(str(row["health_state"])),
         checking=bool(row["checking"]),
         runtime_epoch=int(row["runtime_epoch"]),
         last_error=str(row["last_error"] or ""),
@@ -903,7 +903,7 @@ def _runtime_from_row(row: Any) -> ConsoleProxyRuntimeRecord:
     )
 
 
-def _runtime_update_values(record: ConsoleProxyRuntimeRecord) -> tuple[Any, ...]:
+def _runtime_update_values(record: ProxyRuntimeRecord) -> tuple[Any, ...]:
     """返回运行态 UPDATE 语句的字段值。"""
     return (
         record.health_state.value,
@@ -926,9 +926,9 @@ def _runtime_update_values(record: ConsoleProxyRuntimeRecord) -> tuple[Any, ...]
     )
 
 
-def _binding_from_row(row: Any) -> ConsoleProxyBinding:
+def _binding_from_row(row: Any) -> ProxyBinding:
     """把 SQLite 行转换为绑定模型。"""
-    return ConsoleProxyBinding(
+    return ProxyBinding(
         account_key=str(row["account_key"]),
         proxy_id=str(row["proxy_id"]),
         generation=int(row["generation"]),
@@ -937,13 +937,13 @@ def _binding_from_row(row: Any) -> ConsoleProxyBinding:
     )
 
 
-def _job_from_row(row: Any) -> ConsoleProxyHealthJob:
+def _job_from_row(row: Any) -> ProxyHealthJob:
     """把 SQLite 行转换为健康任务模型。"""
-    return ConsoleProxyHealthJob(
+    return ProxyHealthJob(
         job_id=str(row["job_id"]),
-        kind=ConsoleProxyHealthJobKind(str(row["kind"])),
+        kind=ProxyHealthJobKind(str(row["kind"])),
         dedupe_key=str(row["dedupe_key"]),
-        status=ConsoleProxyHealthJobStatus(str(row["status"])),
+        status=ProxyHealthJobStatus(str(row["status"])),
         total=int(row["total"]),
         completed=int(row["completed"]),
         healthy=int(row["healthy"]),
@@ -960,9 +960,9 @@ def _job_from_row(row: Any) -> ConsoleProxyHealthJob:
     )
 
 
-def _job_item_from_row(row: Any) -> ConsoleProxyHealthJobItem:
+def _job_item_from_row(row: Any) -> ProxyHealthJobItem:
     """把 SQLite 行转换为任务节点模型。"""
-    return ConsoleProxyHealthJobItem(
+    return ProxyHealthJobItem(
         proxy_id=str(row["proxy_id"]),
         generation=int(row["generation"]),
         completed=bool(row["completed"]),
@@ -975,4 +975,4 @@ def _optional_int(value: Any) -> int | None:
     return int(value) if value is not None else None
 
 
-__all__ = ["LocalConsoleProxyStateRepository"]
+__all__ = ["LocalManagedProxyStateRepository"]

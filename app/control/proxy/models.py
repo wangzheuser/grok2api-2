@@ -1,5 +1,6 @@
-"""Control-plane proxy domain models."""
+"""统一代理控制面领域模型。"""
 
+from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 from typing import Self
 
@@ -7,37 +8,46 @@ from pydantic import BaseModel
 
 
 class ProxyScope(StrEnum):
-    APP   = "app"    # grok.com API calls
-    ASSET = "asset"  # static asset / CDN fetches
+    """请求用途，仅用于日志、clearance 和反馈上下文。"""
+
+    APP = "app"
+    ASSET = "asset"
 
 
 class RequestKind(StrEnum):
-    HTTP      = "http"
+    """业务传输类型。"""
+
+    HTTP = "http"
     WEBSOCKET = "websocket"
-    GRPC      = "grpc"
+    GRPC = "grpc"
 
 
 class EgressMode(StrEnum):
-    DIRECT       = "direct"        # no proxy
-    SINGLE_PROXY = "single_proxy"  # one fixed proxy URL
-    PROXY_POOL   = "proxy_pool"    # rotate from a pool
+    """统一出口模式。"""
+
+    DIRECT = "direct"
+    MANAGED_POOL = "managed_pool"
+    RESIN = "resin"
 
 
-class EgressRotationStrategy(StrEnum):
-    """Node selection strategy for the global proxy pool."""
+class ProxyProvider(StrEnum):
+    """实际生成租约的出口提供者。"""
 
-    STICKY_FAILOVER = "sticky_failover"
-    ROUND_ROBIN = "round_robin"
-    RANDOM = "random"
+    DIRECT = "direct"
+    MANAGED_POOL = "managed_pool"
+    RESIN = "resin"
 
 
 class ClearanceMode(StrEnum):
-    NONE         = "none"         # no CF clearance required
-    MANUAL       = "manual"       # operator-supplied cf_cookies
-    FLARESOLVERR = "flaresolverr" # maintained by FlareSolverr
+    """Cloudflare clearance 获取模式。"""
+
+    NONE = "none"
+    MANUAL = "manual"
+    FLARESOLVERR = "flaresolverr"
 
     @classmethod
     def parse(cls, value: str | Self) -> Self:
+        """把配置文本解析为 clearance 模式。"""
         if isinstance(value, cls):
             return value
         normalized = str(value or "").strip().lower()
@@ -46,78 +56,94 @@ class ClearanceMode(StrEnum):
         return cls(normalized)
 
 
-class EgressNodeState(IntEnum):
-    HEALTHY   = 0
-    DEGRADED  = 1
-    UNHEALTHY = 2
-
-
 class ClearanceBundleState(IntEnum):
-    VALID    = 0
-    STALE    = 1
-    INVALID  = 2
+    """Clearance bundle 生命周期状态。"""
+
+    VALID = 0
+    STALE = 1
+    INVALID = 2
 
 
 class ProxyFeedbackKind(StrEnum):
-    SUCCESS         = "success"
-    CHALLENGE       = "challenge"    # CF JS challenge / captcha
-    UNAUTHORIZED    = "unauthorized" # 401 on proxy auth
-    FORBIDDEN       = "forbidden"    # 403 not CF-related
-    RATE_LIMITED    = "rate_limited" # 429
-    UPSTREAM_5XX    = "upstream_5xx"
+    """统一反馈分类。"""
+
+    SUCCESS = "success"
+    CHALLENGE = "challenge"
+    UNAUTHORIZED = "unauthorized"
+    FORBIDDEN = "forbidden"
+    RATE_LIMITED = "rate_limited"
+    UPSTREAM_5XX = "upstream_5xx"
     TRANSPORT_ERROR = "transport_error"
 
 
-class EgressNode(BaseModel):
-    node_id:    str
-    proxy_url:  str | None       = None  # None → direct
-    scope:      ProxyScope       = ProxyScope.APP
-    state:      EgressNodeState  = EgressNodeState.HEALTHY
-    health:     float            = 1.0
-    inflight:   int              = 0
-    last_used:  int | None       = None  # ms
-
-
 class ClearanceBundle(BaseModel):
-    bundle_id:       str
-    cf_cookies:      str            = ""
-    user_agent:      str            = ""
-    state:           ClearanceBundleState = ClearanceBundleState.VALID
-    affinity_key:    str            = ""  # associates bundle with an egress node
-    clearance_host:  str            = "grok.com"
-    last_refresh_at: int | None     = None  # ms
+    """与出口身份和 origin 绑定的 Cloudflare 凭据。"""
+
+    bundle_id: str
+    cf_cookies: str = ""
+    user_agent: str = ""
+    state: ClearanceBundleState = ClearanceBundleState.VALID
+    affinity_key: str = ""
+    clearance_host: str = "grok.com"
+    last_refresh_at: int | None = None
 
 
 class ProxyLease(BaseModel):
-    lease_id:    str
-    proxy_url:   str | None    = None
-    cf_cookies:  str           = ""
-    user_agent:  str           = ""
-    clearance_host: str        = "grok.com"
-    scope:       ProxyScope    = ProxyScope.APP
-    kind:        RequestKind   = RequestKind.HTTP
-    acquired_at: int           = 0   # ms
-    proxy_pool:  str           = ""  # console / global / empty
-    proxy_id:    str           = ""
-    proxy_mode:  str           = ""
-    generation:  int           = 0
-    runtime_epoch: int         = 0
-    account_key: str           = ""
+    """一次逻辑请求在其子步骤间传递的统一出口租约。"""
+
+    lease_id: str
+    proxy_url: str | None = None
+    cf_cookies: str = ""
+    user_agent: str = ""
+    clearance_host: str = "grok.com"
+    scope: ProxyScope = ProxyScope.APP
+    kind: RequestKind = RequestKind.HTTP
+    acquired_at: int = 0
+    proxy_id: str = ""
+    proxy_mode: str = ""
+    generation: int = 0
+    runtime_epoch: int = 0
+    account_key: str = ""
+    provider: ProxyProvider = ProxyProvider.DIRECT
+    affinity_key: str = "direct"
+    origin: str = "https://grok.com"
 
     @property
     def has_proxy(self) -> bool:
+        """返回租约是否包含正向代理 URL。"""
         return bool(self.proxy_url)
 
 
 class ProxyFeedback(BaseModel):
-    kind:           ProxyFeedbackKind
-    status_code:    int | None = None
-    reason:         str        = ""
+    """业务请求结束后回写的代理相关观测。"""
+
+    kind: ProxyFeedbackKind
+    status_code: int | None = None
+    reason: str = ""
     retry_after_ms: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ProxyRequestContext:
+    """一次上游请求参与代理选择的稳定上下文。"""
+
+    account_key: str
+    origin: str = "https://grok.com"
+    scope: ProxyScope = ProxyScope.APP
+    kind: RequestKind = RequestKind.HTTP
+    request_id: str = ""
+
+
 __all__ = [
-    "ProxyScope", "RequestKind", "EgressMode", "EgressRotationStrategy", "ClearanceMode",
-    "EgressNodeState", "ClearanceBundleState", "ProxyFeedbackKind",
-    "EgressNode", "ClearanceBundle", "ProxyLease", "ProxyFeedback",
+    "ClearanceBundle",
+    "ClearanceBundleState",
+    "ClearanceMode",
+    "EgressMode",
+    "ProxyFeedback",
+    "ProxyFeedbackKind",
+    "ProxyLease",
+    "ProxyProvider",
+    "ProxyRequestContext",
+    "ProxyScope",
+    "RequestKind",
 ]

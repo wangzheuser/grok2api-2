@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from app.control.account.identity import account_log_key
 from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
@@ -48,9 +49,9 @@ async def mark_account_invalid_credentials(
         ]
     )
     logger.info(
-        "account expired from {}: token={}... status={} upstream_status={}",
+        "account expired from {}: account_key={} status={} upstream_status={}",
         source,
-        token[:10],
+        account_log_key(token),
         AccountStatus.EXPIRED,
         getattr(exc, "status", None) if isinstance(exc, UpstreamError) else None,
     )

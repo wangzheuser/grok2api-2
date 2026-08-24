@@ -4,6 +4,7 @@ Called after every upstream call to update account health/quota and proxy state.
 """
 
 from app.control.account.commands import AccountPatch
+from app.control.proxy.feedback import feedback_for_upstream_error
 from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
 from app.platform.runtime.clock import now_ms
 from .types import ResultCategory, ReverseResult
@@ -65,7 +66,7 @@ _CATEGORY_TO_PROXY: dict[ResultCategory, ProxyFeedbackKind] = {
     ResultCategory.SUCCESS:      ProxyFeedbackKind.SUCCESS,
     ResultCategory.RATE_LIMITED:  ProxyFeedbackKind.RATE_LIMITED,
     ResultCategory.AUTH_FAILURE:  ProxyFeedbackKind.UNAUTHORIZED,
-    ResultCategory.FORBIDDEN:     ProxyFeedbackKind.CHALLENGE,
+    ResultCategory.FORBIDDEN:     ProxyFeedbackKind.FORBIDDEN,
     ResultCategory.UPSTREAM_5XX:  ProxyFeedbackKind.UPSTREAM_5XX,
     ResultCategory.TRANSPORT_ERR: ProxyFeedbackKind.TRANSPORT_ERROR,
 }
@@ -73,6 +74,18 @@ _CATEGORY_TO_PROXY: dict[ResultCategory, ProxyFeedbackKind] = {
 
 def build_proxy_feedback(result: ReverseResult) -> ProxyFeedback:
     """Build a ProxyFeedback from a ReverseResult."""
+    if result.category in {
+        ResultCategory.AUTH_FAILURE,
+        ResultCategory.FORBIDDEN,
+        ResultCategory.UPSTREAM_5XX,
+        ResultCategory.TRANSPORT_ERR,
+    }:
+        return feedback_for_upstream_error(
+            status_code=result.status_code,
+            body=result.body,
+            code=result.error_code,
+            reason=result.error,
+        )
     kind = _CATEGORY_TO_PROXY.get(result.category, ProxyFeedbackKind.TRANSPORT_ERROR)
     return ProxyFeedback(
         kind=kind,

@@ -14,6 +14,7 @@ from typing import Any, AsyncGenerator
 
 import orjson
 
+from app.control.account.identity import account_log_key
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError
@@ -22,6 +23,8 @@ from app.platform.tokens import estimate_prompt_tokens, estimate_tokens, estimat
 from app.control.model.enums import ModeId
 from app.control.model.registry import resolve as resolve_model
 from app.control.account.enums import FeedbackKind
+from app.control.proxy.models import ProxyLease
+from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.reverse.protocol.xai_chat import classify_line, StreamAdapter
 from app.dataplane.reverse.protocol.tool_prompt import (
     build_tool_system_prompt, extract_tool_names, inject_into_message,
@@ -366,6 +369,8 @@ async def create(
             collected_annotations: list[dict] = []
 
             try:
+                proxy_runtime = await get_proxy_runtime()
+                proxy_lease = await proxy_runtime.acquire(token=token)
                 try:
                     # message_start
                     yield _sse("message_start", {
@@ -390,6 +395,7 @@ async def create(
                         message   = internal_message,
                         files     = files,
                         timeout_s = timeout_s,
+                        lease     = proxy_lease,
                     ):
                         if tool_calls_emitted:
                             break
@@ -547,7 +553,12 @@ async def create(
                     else:
                         # Resolve image attachments and references
                         for url, img_id in adapter.image_urls:
-                            img_text = await _resolve_image(token, url, img_id)
+                            img_text = await _resolve_image(
+                                token,
+                                url,
+                                img_id,
+                                lease=proxy_lease,
+                            )
                             if isinstance(img_text, str):
                                 chunk = img_text + "\n"
                                 text_buf.append(chunk)
@@ -614,8 +625,8 @@ async def create(
                     if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
                         _retry = True
                         logger.warning(
-                            "messages stream retry: attempt={}/{} status={} token={}...",
-                            attempt + 1, max_retries, exc.status, token[:8],
+                            "messages stream retry: attempt={}/{} status={} account_key={}",
+                            attempt + 1, max_retries, exc.status, account_log_key(token),
                         )
                     else:
                         raise
@@ -645,6 +656,7 @@ async def create(
     # -------------------------------------------------------------------------
     excluded: list[str] = []
     token    = ""
+    proxy_lease: ProxyLease | None = None
     adapter  = StreamAdapter()
 
     for attempt in range(max_retries + 1):
@@ -664,6 +676,8 @@ async def create(
         adapter  = StreamAdapter()
 
         try:
+            proxy_runtime = await get_proxy_runtime()
+            proxy_lease = await proxy_runtime.acquire(token=token)
             try:
                 ended = False
                 async for line in _stream_chat(
@@ -672,6 +686,7 @@ async def create(
                     message   = internal_message,
                     files     = files,
                     timeout_s = timeout_s,
+                    lease     = proxy_lease,
                 ):
                     event_type, data = classify_line(line)
                     if event_type == "done":
@@ -691,8 +706,8 @@ async def create(
                 if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
                     _retry = True
                     logger.warning(
-                        "messages retry: attempt={}/{} status={} token={}...",
-                        attempt + 1, max_retries, exc.status, token[:8],
+                        "messages retry: attempt={}/{} status={} account_key={}",
+                        attempt + 1, max_retries, exc.status, account_log_key(token),
                     )
                 else:
                     raise
@@ -719,7 +734,10 @@ async def create(
     # Resolve image attachments
     if adapter.image_urls:
         img_texts = await asyncio.gather(
-            *[_resolve_image(token, url, img_id) for url, img_id in adapter.image_urls],
+            *[
+                _resolve_image(token, url, img_id, lease=proxy_lease)
+                for url, img_id in adapter.image_urls
+            ],
             return_exceptions=True,
         )
         for img_text in img_texts:

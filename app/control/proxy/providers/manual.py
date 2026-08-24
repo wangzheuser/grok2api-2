@@ -1,6 +1,7 @@
 """Manual clearance provider — uses operator-supplied cookies directly."""
 
 from app.platform.config.snapshot import get_config
+from app.platform.runtime.clock import now_ms
 from ..config import resolve_clearance_config
 from ..models import ClearanceBundle, ClearanceMode
 
@@ -25,6 +26,7 @@ class ManualClearanceProvider:
             user_agent=clearance.user_agent,
             affinity_key=affinity_key,
             clearance_host=clearance_host,
+            last_refresh_at=now_ms(),
         )
 
 

@@ -22,7 +22,13 @@ import orjson
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
-from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind, ProxyScope, RequestKind
+from app.control.proxy.models import (
+    ProxyFeedback,
+    ProxyFeedbackKind,
+    ProxyLease,
+    ProxyScope,
+    RequestKind,
+)
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.reverse.transport._proxy_feedback import upstream_feedback
 from app.dataplane.proxy.adapters.headers import build_ws_headers
@@ -283,6 +289,7 @@ async def stream_images(
     n:            int  = 1,
     enable_nsfw:  bool = True,
     enable_pro:   bool = False,
+    lease: ProxyLease | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream image events, collecting *n* final images.
 
@@ -300,13 +307,27 @@ async def stream_images(
     inter_round_wait_s = _INTER_ROUND_WAIT_S
 
     collected = 0
+    proxy = await get_proxy_runtime()
+    if lease is None:
+        # 重连仍沿用同一租约，避免一个图片请求在多个出口身份间漂移。
+        lease = await proxy.acquire(
+            token=token,
+            scope=ProxyScope.APP,
+            kind=RequestKind.WEBSOCKET,
+            clearance_origin="https://grok.com",
+        )
+    else:
+        lease = await proxy.derive(
+            lease,
+            origin="https://grok.com",
+            scope=ProxyScope.APP,
+            kind=RequestKind.WEBSOCKET,
+        )
 
     while collected < n:
         needed = n - collected
 
         # ── Establish connection ──────────────────────────────────────────────
-        proxy   = await get_proxy_runtime()
-        lease   = await proxy.acquire(scope=ProxyScope.APP, kind=RequestKind.WEBSOCKET)
         headers = build_ws_headers(token=token, lease=lease)
 
         try:
@@ -373,7 +394,7 @@ async def stream_images(
             return
 
         # Server closed the connection but we still need more images → reconnect.
-        # Give back the current lease before acquiring a new one on the next iteration.
+        # 重连复用原租约，仅重建底层 WebSocket 连接。
         await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200))
         logger.info("imagine websocket reconnecting: remaining_images={} requested_images={}", n - collected, n)
 

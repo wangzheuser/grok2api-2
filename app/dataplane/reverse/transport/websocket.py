@@ -10,7 +10,9 @@ from aiohttp_socks import ProxyConnector
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
-from app.control.proxy.models import ProxyLease
+from app.control.proxy.models import ProxyLease, ProxyProvider
+from app.control.proxy.managed_pool import mask_proxy_url
+from app.platform.errors import UpstreamError
 
 
 def _ssl_ctx() -> ssl.SSLContext:
@@ -46,9 +48,15 @@ def _build_connector(
         kwargs: dict = {"ssl": ssl_ctx}
         if rdns is not None:
             kwargs["rdns"] = rdns
-        logger.debug("websocket connector selected: proxy_type=socks proxy_url={}", proxy_url)
+        logger.debug(
+            "websocket connector selected: proxy_type=socks proxy_url={}",
+            mask_proxy_url(proxy_url),
+        )
         return ProxyConnector.from_url(normalized, **kwargs), None
-    logger.debug("websocket connector selected: proxy_type=http proxy_url={}", proxy_url)
+    logger.debug(
+        "websocket connector selected: proxy_type=http proxy_url={}",
+        mask_proxy_url(proxy_url),
+    )
     return aiohttp.TCPConnector(ssl=ssl_ctx), proxy_url
 
 
@@ -84,8 +92,7 @@ class WebSocketConnection:
 class WebSocketClient:
     """Establish WebSocket connections through optional proxy."""
 
-    def __init__(self, proxy: str | None = None) -> None:
-        self._proxy_override = proxy
+    def __init__(self) -> None:
         self._ssl = _ssl_ctx()
 
     async def connect(
@@ -98,7 +105,7 @@ class WebSocketClient:
         lease:    ProxyLease | None                      = None,
         on_close: Callable[[], Awaitable[None]] | None   = None,
     ) -> WebSocketConnection:
-        proxy_url  = self._proxy_override or (lease.proxy_url if lease else "")
+        proxy_url = lease.proxy_url if lease and lease.proxy_url else ""
         connector, http_proxy = _build_connector(proxy_url, self._ssl)
 
         cfg           = get_config()
@@ -131,8 +138,25 @@ class WebSocketClient:
                 )
 
             return WebSocketConnection(session, ws, on_close=on_close)
-        except Exception:
+        except Exception as exc:
             await session.close()
+            status = getattr(exc, "status", None)
+            if (
+                lease is not None
+                and lease.provider == ProxyProvider.RESIN
+                and (status is None or status in {407, 502, 503})
+            ):
+                raise UpstreamError(
+                    "Egress proxy is unavailable",
+                    status=503,
+                    code="egress_proxy_unavailable",
+                ) from exc
+            if lease is not None and lease.has_proxy:
+                raise UpstreamError(
+                    "WebSocket proxy transport failed",
+                    status=502,
+                    code="egress_transport_error",
+                ) from exc
             raise
 
 
