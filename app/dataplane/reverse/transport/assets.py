@@ -194,7 +194,12 @@ async def download_asset(
     }
 
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire(scope=ProxyScope.ASSET, kind=RequestKind.HTTP)
+    # 二进制媒体下载使用资源代理池；列表和删除等元数据请求仍走基础出口。
+    lease = await proxy.acquire(
+        scope=ProxyScope.ASSET,
+        kind=RequestKind.HTTP,
+        resource=True,
+    )
 
     try:
         stream = await get_bytes_stream(

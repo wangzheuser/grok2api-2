@@ -78,6 +78,8 @@ mode = "direct"
 proxy_url = ""
 # 基础代理池（API 流量，proxy_pool 模式必填）
 proxy_pool = []
+# 代理池轮换策略：sticky_failover | round_robin | random
+rotation_strategy = "sticky_failover"
 # 资源代理 URL（图片/视频下载，未配置则回落到 proxy_url）
 resource_proxy_url = ""
 # 资源代理池（图片/视频下载，未配置则回落到 proxy_pool）
@@ -135,7 +137,7 @@ fast_fail_without_fallback = true
 # 是否启用 Console 专用代理池；仅影响 console.x.ai 请求
 enabled = false
 # Console 代理池无可调度代理时是否回退到全局 proxy.egress
-fallback_to_global_proxy = true
+fallback_to_global_proxy = false
 # 同一账号遇到代理硬失败时，本请求最多重绑代理重试次数
 max_proxy_retries_per_request = 1
 # 403 / challenge 软失败达到多少次后切换代理
@@ -148,7 +150,7 @@ dynamic_retry_base_sec = 60
 dynamic_retry_max_sec = 600
 # 动态模板代理连续失败退避因子
 dynamic_backoff_factor = 2.0
-# 是否启用后台连通性检测默认开关
+# 是否启用后台定时连通性检测
 health_check_enabled = true
 # 代理检测地址
 health_check_url = "https://console.x.ai/"
@@ -156,6 +158,10 @@ health_check_url = "https://console.x.ai/"
 health_check_interval_sec = 300
 # 代理检测超时（秒）
 health_check_timeout_sec = 15
+# 单个 Worker 执行健康任务的最大并发数
+health_check_concurrency = 20
+# 账号 sticky 绑定闲置清理时间（秒），默认 7 天
+binding_idle_ttl_sec = 604800
 # Console 专用代理条目，由后台代理池页维护
 entries = []
 

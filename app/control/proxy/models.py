@@ -23,6 +23,14 @@ class EgressMode(StrEnum):
     PROXY_POOL   = "proxy_pool"    # rotate from a pool
 
 
+class EgressRotationStrategy(StrEnum):
+    """Node selection strategy for the global proxy pool."""
+
+    STICKY_FAILOVER = "sticky_failover"
+    ROUND_ROBIN = "round_robin"
+    RANDOM = "random"
+
+
 class ClearanceMode(StrEnum):
     NONE         = "none"         # no CF clearance required
     MANUAL       = "manual"       # operator-supplied cf_cookies
@@ -109,7 +117,7 @@ class ProxyFeedback(BaseModel):
 
 
 __all__ = [
-    "ProxyScope", "RequestKind", "EgressMode", "ClearanceMode",
+    "ProxyScope", "RequestKind", "EgressMode", "EgressRotationStrategy", "ClearanceMode",
     "EgressNodeState", "ClearanceBundleState", "ProxyFeedbackKind",
     "EgressNode", "ClearanceBundle", "ProxyLease", "ProxyFeedback",
 ]

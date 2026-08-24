@@ -1,3 +1,25 @@
+<!-- PRODUCTION_DEPLOYMENT_POLICY_START -->
+## 生产环境 Docker 部署规则入口
+
+当任务涉及 Docker 镜像构建、生产服务器部署、服务更新、容器重启、
+Docker Compose、运行配置同步、部署验证或回滚时，执行前必须先完整阅读：
+
+`docs/deployment/production-docker.md`
+
+不可绕过的核心规则：
+
+1. 生产镜像只在本地工作站构建，目标平台固定为 `linux/amd64`。
+2. 镜像通过归档上传到服务器，服务器使用 `docker load` 导入。
+3. 服务器使用 `docker compose --env-file .env up -d --no-build` 启动。
+4. 服务器不执行 `docker build`、`docker buildx build`、`docker compose build`
+   或其他等价的镜像构建操作。
+5. 后台登录密码只从本地 `.env` 的 `GROK_APP_APP_KEY` 读取；只检查变量是否存在，
+   不回显、记录或写入仓库。
+6. 常规更新只替换应用镜像，不覆盖服务器已有 `data/`、数据库、配置和其他运行态数据。
+7. 服务器连接参数从本机受控配置按需读取，不写入仓库文档。
+8. 上传文件、修改生产配置、替换容器或操作生产数据前，按项目危险操作规范取得明确确认。
+<!-- PRODUCTION_DEPLOYMENT_POLICY_END -->
+
 <claude-mem-context>
 # Memory Context
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -115,13 +116,14 @@ class ConfigSnapshot:
         return str(val) if val is not None else default
 
     def get_list(self, key: str, default: list | None = None) -> list:
+        """Return a list while accepting comma- or newline-delimited text."""
         val = self.get(key, default)
         if val is None:
             return [] if default is None else default
         if isinstance(val, list):
             return val
         if isinstance(val, str):
-            return [p.strip() for p in val.split(",") if p.strip()]
+            return [p.strip() for p in re.split(r"[,\r\n]+", val) if p.strip()]
         return [val]
 
     async def update(self, patch: dict[str, Any]) -> None:

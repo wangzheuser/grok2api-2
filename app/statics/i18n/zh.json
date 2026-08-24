@@ -529,7 +529,7 @@
         },
         "proxyPool": {
           "label": "基础代理池",
-          "desc": "API 流量代理池，每行一个代理 URL，请求时轮转使用。"
+          "desc": "API 流量代理池，每行一个代理 URL；具体选点行为由轮换策略控制。"
         },
         "resourceProxyPool": {
           "label": "资源代理池",

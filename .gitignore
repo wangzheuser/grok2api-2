@@ -55,4 +55,7 @@ htmlcov/
 .ace-tool/
 
 # Local analysis docs (not for public repo)
-docs/
+docs/*
+!docs/deployment/
+docs/deployment/*
+!docs/deployment/production-docker.md

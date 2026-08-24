@@ -529,7 +529,7 @@
         },
         "proxyPool": {
           "label": "Primary Proxy Pool",
-          "desc": "Pool of outbound proxies for API traffic, one proxy URL per line."
+          "desc": "Pool of outbound proxies for API traffic, one proxy URL per line. Node selection follows the configured rotation strategy."
         },
         "resourceProxyPool": {
           "label": "Resource Proxy Pool",

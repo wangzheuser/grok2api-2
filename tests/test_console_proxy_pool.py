@@ -1,9 +1,23 @@
 import unittest
-from unittest.mock import patch
+from dataclasses import replace
+from unittest.mock import AsyncMock, patch
 
-from app.control.proxy.console_pool import ConsoleProxyEntry, ConsoleProxyPool, account_key_for_token
-from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind, ProxyLease
-from app.platform.runtime.ids import next_hex
+from app.control.proxy.console_pool import (
+    ConsoleProxyEntry,
+    ConsoleProxyPool,
+    account_key_for_token,
+)
+from app.control.proxy.console_state import (
+    ConsoleProxyHealthState,
+    ConsoleProxyProbeOutcome,
+    InMemoryConsoleProxyStateRepository,
+)
+from app.control.proxy.models import (
+    ProxyFeedback,
+    ProxyFeedbackKind,
+    ProxyLease,
+)
+from app.platform.errors import UpstreamError
 
 
 class _PoolConfig:
@@ -25,116 +39,617 @@ class _PoolConfig:
     def get_float(self, key, default=0.0):
         return float(self.values.get(key, default))
 
+    def get_str(self, key, default=""):
+        return str(self.values.get(key, default))
+
+    def get_list(self, key, default=None):
+        return self.values.get(key, default or [])
+
 
 async def _fallback_lease_factory(**kwargs):
-    proxy_url = kwargs.pop("proxy_url_override", None) or "http://global:8080"
-    return ProxyLease(lease_id=next_hex(), proxy_url=proxy_url, **kwargs)
+    """返回包含 override 的本地租约。"""
+    return ProxyLease(
+        lease_id="lease",
+        proxy_url=kwargs.get("proxy_url_override"),
+    )
+
+
+async def _global_proxy_lease_factory(**kwargs):
+    """返回一个已配置的全局固定代理租约。"""
+    return ProxyLease(
+        lease_id="global",
+        proxy_url="http://global:8080",
+        proxy_pool="global",
+    )
 
 
 class ConsoleProxyPoolTests(unittest.IsolatedAsyncioTestCase):
-    async def test_static_proxy_uses_account_sticky_binding(self):
-        cfg = _PoolConfig({
-            "console.proxy_pool.enabled": True,
-            "console.proxy_pool.entries": [
-                {"id": "p1", "url": "http://proxy1:8080", "mode": "static", "enabled": True},
-                {"id": "p2", "url": "http://proxy2:8080", "mode": "static", "enabled": True},
-            ],
-        })
-        pool = ConsoleProxyPool()
+    async def _pool(self, cfg):
+        """构造并初始化共享内存代理池。"""
+        pool = ConsoleProxyPool(InMemoryConsoleProxyStateRepository())
         with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
-            first = await pool.acquire(token="token-a", fallback_lease_factory=_fallback_lease_factory)
-            second = await pool.acquire(token="token-a", fallback_lease_factory=_fallback_lease_factory)
-            third = await pool.acquire(token="token-b", fallback_lease_factory=_fallback_lease_factory)
+            await pool.initialize()
+        return pool
 
-        self.assertEqual(first.proxy_id, second.proxy_id)
-        self.assertNotEqual(first.proxy_id, third.proxy_id)
-        self.assertEqual(first.proxy_pool, "console")
-        self.assertEqual(first.account_key, account_key_for_token("token-a"))
-
-    async def test_dynamic_template_rerenders_per_request_but_keeps_proxy_id(self):
-        cfg = _PoolConfig({
-            "console.proxy_pool.enabled": True,
-            "console.proxy_pool.entries": [
-                {"id": "dyn", "url": "http://proxy-{time}.example.com:8080", "enabled": True},
-            ],
-        })
-        pool = ConsoleProxyPool()
-        with patch("app.control.proxy.console_pool.get_config", return_value=cfg), patch(
-            "app.control.proxy.console_pool.now_ms", side_effect=[1000, 2000]
-        ):
-            first = await pool.acquire(token="token-a", fallback_lease_factory=_fallback_lease_factory)
-            second = await pool.acquire(token="token-a", fallback_lease_factory=_fallback_lease_factory)
-
-        self.assertEqual(first.proxy_id, "dyn")
-        self.assertEqual(second.proxy_id, "dyn")
-        self.assertIn("1000", first.proxy_url)
-        self.assertIn("2000", second.proxy_url)
-
-    async def test_model_transient_rate_limit_feedback_does_not_mark_proxy_failed(self):
-        cfg = _PoolConfig({
-            "console.proxy_pool.enabled": True,
-            "console.proxy_pool.entries": [{"id": "p1", "url": "http://proxy1:8080", "enabled": True}],
-        })
-        pool = ConsoleProxyPool()
+    async def _mark_all_healthy(self, pool, cfg):
+        """把配置中的全部节点通过健康门禁。"""
         with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
-            lease = await pool.acquire(token="token-a", fallback_lease_factory=_fallback_lease_factory)
-            await pool.feedback(
-                lease,
-                ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=429, reason="model_transient_rate_limit"),
+            for entry in await pool.entries(include_secret=True):
+                await pool.record_health_result(
+                    entry.id,
+                    generation=entry.generation,
+                    outcome=ConsoleProxyProbeOutcome.HEALTHY,
+                    message="HTTP 200",
+                    latency_ms=10,
+                )
+
+    async def test_unknown_proxy_is_not_schedulable(self):
+        """新节点在首次检测通过前应失败关闭。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.fallback_to_global_proxy": False,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"}
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            with self.assertRaises(UpstreamError) as caught:
+                await pool.acquire(
+                    token="token-a",
+                    fallback_lease_factory=_fallback_lease_factory,
+                )
+        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual(caught.exception.code, "console_proxy_unavailable")
+
+    async def test_disabled_console_pool_explicitly_allows_global_direct(self):
+        """Console 总开关关闭时应完全绕过专用池并保留全局 direct。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": False,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"}
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+        fallback = AsyncMock(
+            return_value=ProxyLease(lease_id="direct", proxy_url=None)
+        )
+
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            lease = await pool.acquire(
+                token="token-a",
+                fallback_lease_factory=fallback,
             )
-            again = await pool.acquire(token="token-a", fallback_lease_factory=_fallback_lease_factory)
-            snap = await pool.snapshot()
 
-        self.assertEqual(again.proxy_id, lease.proxy_id)
-        self.assertEqual(snap["items"][0]["failure_count"], 0)
-        self.assertEqual(snap["items"][0]["bound_account_count"], 1)
+        self.assertFalse(lease.has_proxy)
+        fallback.assert_awaited_once()
 
-    async def test_transport_error_marks_failed_and_rebinds_account(self):
-        cfg = _PoolConfig({
-            "console.proxy_pool.enabled": True,
-            "console.proxy_pool.static_cooldown_sec": 60,
-            "console.proxy_pool.entries": [
-                {"id": "p1", "url": "http://proxy1:8080", "enabled": True},
-                {"id": "p2", "url": "http://proxy2:8080", "enabled": True},
-            ],
-        })
-        pool = ConsoleProxyPool()
+    async def test_enabled_console_pool_never_falls_back_to_direct(self):
+        """Console 池无健康节点时，即使开启回退也不得产生直连租约。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.fallback_to_global_proxy": True,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"}
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+
         with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
-            lease = await pool.acquire(token="token-a", fallback_lease_factory=_fallback_lease_factory)
-            await pool.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR, reason="connect failed"))
-            rebound = await pool.acquire(token="token-a", fallback_lease_factory=_fallback_lease_factory)
-            snap = await pool.snapshot()
+            with self.assertRaises(UpstreamError) as caught:
+                await pool.acquire(
+                    token="token-a",
+                    fallback_lease_factory=_fallback_lease_factory,
+                )
 
-        self.assertEqual(lease.proxy_id, "p1")
-        self.assertEqual(rebound.proxy_id, "p2")
-        self.assertEqual(snap["items"][0]["failure_count"], 1)
-        self.assertEqual(snap["items"][0]["status"], "cooling_down")
+        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual(caught.exception.code, "console_proxy_unavailable")
 
-    def test_password_placeholder_does_not_infer_dynamic_mode(self):
-        entry = ConsoleProxyEntry(url="http://proxy.example.com:8080", username="user", password="pass-{time}")
-        self.assertEqual(entry.inferred_mode().value, "static")
+    async def test_enabled_console_pool_may_fall_back_to_configured_proxy(self):
+        """Console 池无健康节点时可显式回退到真实全局代理。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.fallback_to_global_proxy": True,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"}
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
 
-
-class ConsoleProxyPoolSoftFailureTests(unittest.IsolatedAsyncioTestCase):
-    async def test_challenge_is_soft_failure_until_threshold(self):
-        cfg = _PoolConfig({
-            "console.proxy_pool.enabled": True,
-            "console.proxy_pool.challenge_failure_threshold": 2,
-            "console.proxy_pool.entries": [
-                {"id": "p1", "url": "http://proxy1:8080", "enabled": True},
-                {"id": "p2", "url": "http://proxy2:8080", "enabled": True},
-            ],
-        })
-        pool = ConsoleProxyPool()
         with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
-            lease = await pool.acquire(token="token-a", fallback_lease_factory=_fallback_lease_factory)
-            await pool.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.CHALLENGE, status_code=403))
-            still = await pool.acquire(token="token-a", fallback_lease_factory=_fallback_lease_factory)
-            await pool.feedback(still, ProxyFeedback(kind=ProxyFeedbackKind.CHALLENGE, status_code=403))
-            rebound = await pool.acquire(token="token-a", fallback_lease_factory=_fallback_lease_factory)
+            lease = await pool.acquire(
+                token="token-a",
+                fallback_lease_factory=_global_proxy_lease_factory,
+            )
 
-        self.assertEqual(still.proxy_id, "p1")
-        self.assertEqual(rebound.proxy_id, "p2")
+        self.assertEqual(lease.proxy_url, "http://global:8080")
+        self.assertEqual(lease.proxy_pool, "global")
+
+    async def test_console_override_works_independently_of_global_mode(self):
+        """健康 Console 节点应始终通过 override 进入统一 Session 层。"""
+        cfg = _PoolConfig(
+            {
+                "proxy.egress.mode": "direct",
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"}
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+        await self._mark_all_healthy(pool, cfg)
+        fallback = AsyncMock(side_effect=_fallback_lease_factory)
+
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            lease = await pool.acquire(
+                token="token-a",
+                fallback_lease_factory=fallback,
+            )
+
+        self.assertEqual(lease.proxy_url, "http://proxy1:8080")
+        self.assertEqual(lease.proxy_pool, "console")
+        self.assertEqual(
+            fallback.await_args.kwargs["proxy_url_override"],
+            "http://proxy1:8080",
+        )
+
+    async def test_shared_state_failure_returns_stable_503(self):
+        """共享状态读取异常时应失败关闭并返回专用错误码。"""
+        class FailingRepository(InMemoryConsoleProxyStateRepository):
+            async def acquire_binding(self, *args, **kwargs):
+                """模拟共享存储在请求阶段不可用。"""
+                raise RuntimeError("state backend down")
+
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"}
+                ],
+            }
+        )
+        pool = ConsoleProxyPool(FailingRepository())
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            await pool.initialize()
+            with self.assertRaises(UpstreamError) as caught:
+                await pool.acquire(
+                    token="token-a",
+                    fallback_lease_factory=_fallback_lease_factory,
+                )
+
+        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual(
+            caught.exception.code,
+            "console_proxy_state_unavailable",
+        )
+
+    async def test_static_proxy_uses_shared_account_sticky_binding(self):
+        """同一共享仓储中的两个池实例应复用账号绑定。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"},
+                    {"id": "p2", "url": "http://proxy2:8080"},
+                ],
+            }
+        )
+        repo = InMemoryConsoleProxyStateRepository()
+        first_pool = ConsoleProxyPool(repo)
+        second_pool = ConsoleProxyPool(repo)
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            await first_pool.initialize()
+            await second_pool.initialize()
+            await self._mark_all_healthy(first_pool, cfg)
+            first = await first_pool.acquire(
+                token="token-a",
+                fallback_lease_factory=_fallback_lease_factory,
+            )
+            second = await second_pool.acquire(
+                token="token-a",
+                fallback_lease_factory=_fallback_lease_factory,
+            )
+        self.assertEqual(first.proxy_id, second.proxy_id)
+        self.assertEqual(first.proxy_url, second.proxy_url)
+
+    async def test_transport_error_is_visible_to_other_pool_instance(self):
+        """一个 Worker 标记失败后另一个 Worker应立即改绑。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.static_cooldown_sec": 60,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"},
+                    {"id": "p2", "url": "http://proxy2:8080"},
+                ],
+            }
+        )
+        repo = InMemoryConsoleProxyStateRepository()
+        first_pool = ConsoleProxyPool(repo)
+        second_pool = ConsoleProxyPool(repo)
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            await first_pool.initialize()
+            await second_pool.initialize()
+            await self._mark_all_healthy(first_pool, cfg)
+            first = await first_pool.acquire(
+                token="token-a",
+                fallback_lease_factory=_fallback_lease_factory,
+            )
+            await first_pool.feedback(
+                first,
+                ProxyFeedback(
+                    kind=ProxyFeedbackKind.TRANSPORT_ERROR,
+                    reason="connect failed",
+                ),
+            )
+            second = await second_pool.acquire(
+                token="token-a",
+                fallback_lease_factory=_fallback_lease_factory,
+            )
+        self.assertNotEqual(first.proxy_id, second.proxy_id)
+
+    async def test_dynamic_template_infers_password_placeholder(self):
+        """密码中的 time 占位符也应自动推断为动态模板。"""
+        entry = ConsoleProxyEntry(
+            url="http://proxy:8080",
+            username="user",
+            password="pass-{time}",
+        )
+        self.assertEqual(entry.inferred_mode().value, "dynamic_template")
+
+    async def test_inconclusive_probe_does_not_restore_unknown_proxy(self):
+        """429/5xx 等不确定结果不应绕过严格健康门禁。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"}
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            await pool.record_health_result(
+                "p1",
+                generation=0,
+                outcome=ConsoleProxyProbeOutcome.INCONCLUSIVE,
+                message="HTTP 429",
+                latency_ms=10,
+            )
+            runtime = await pool.state_repository.get_runtime("p1")
+        self.assertEqual(runtime.health_state, ConsoleProxyHealthState.UNKNOWN)
+
+    async def test_health_failure_does_not_increment_request_failure_count(self):
+        """主动检测失败应冷却节点但不混入请求失败计数。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.static_cooldown_sec": 60,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"}
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            await pool.record_health_result(
+                "p1",
+                generation=0,
+                outcome=ConsoleProxyProbeOutcome.UNHEALTHY,
+                message="connect failed",
+                latency_ms=123,
+            )
+            runtime = await pool.state_repository.get_runtime("p1")
+        self.assertEqual(runtime.health_state, ConsoleProxyHealthState.COOLING_DOWN)
+        self.assertEqual(runtime.failure_count, 0)
+        self.assertEqual(runtime.health_failure_count, 1)
+
+    async def test_expired_cooldown_becomes_unknown_not_healthy(self):
+        """冷却到期后节点必须回到 unknown 并等待重新探测。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.static_cooldown_sec": 1,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"}
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+        await self._mark_all_healthy(pool, cfg)
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            lease = await pool.acquire(
+                token="token-a",
+                fallback_lease_factory=_fallback_lease_factory,
+            )
+            await pool.mark_failure(lease, "connect failed")
+            runtime = await pool.state_repository.get_runtime("p1")
+            expired = await pool.state_repository.compare_and_swap_runtime(
+                runtime,
+                replace(runtime, next_retry_at=1),
+            )
+            self.assertIsNotNone(expired)
+            snapshot = await pool.snapshot()
+
+        self.assertEqual(snapshot["items"][0]["status"], "unknown")
+
+    async def test_dead_proxy_requires_reset_before_recovery(self):
+        """HTTP 407 进入 dead 后，普通健康结果不得直接恢复节点。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"}
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            await pool.record_health_result(
+                "p1",
+                generation=0,
+                outcome=ConsoleProxyProbeOutcome.UNHEALTHY,
+                message="HTTP 407",
+                latency_ms=10,
+                status_code=407,
+            )
+            await pool.record_health_result(
+                "p1",
+                generation=0,
+                outcome=ConsoleProxyProbeOutcome.HEALTHY,
+                message="HTTP 200",
+                latency_ms=10,
+            )
+            runtime = await pool.state_repository.get_runtime("p1")
+            reset = await pool.reset_entry("p1")
+            reset_runtime = await pool.state_repository.get_runtime("p1")
+            await pool.record_health_result(
+                "p1",
+                generation=0,
+                outcome=ConsoleProxyProbeOutcome.HEALTHY,
+                message="HTTP 200",
+                latency_ms=10,
+            )
+            recovered = await pool.state_repository.get_runtime("p1")
+
+        self.assertEqual(runtime.health_state, ConsoleProxyHealthState.DEAD)
+        self.assertTrue(reset)
+        self.assertEqual(reset_runtime.health_state, ConsoleProxyHealthState.UNKNOWN)
+        self.assertEqual(recovered.health_state, ConsoleProxyHealthState.HEALTHY)
+
+    async def test_active_cooldown_cannot_be_recovered_early(self):
+        """冷却未到期时，即使探测返回 200 也应继续保持冷却。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.static_cooldown_sec": 60,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"}
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            await pool.record_health_result(
+                "p1",
+                generation=0,
+                outcome=ConsoleProxyProbeOutcome.UNHEALTHY,
+                message="HTTP 403",
+                latency_ms=10,
+            )
+            await pool.record_health_result(
+                "p1",
+                generation=0,
+                outcome=ConsoleProxyProbeOutcome.HEALTHY,
+                message="HTTP 200",
+                latency_ms=10,
+            )
+            runtime = await pool.state_repository.get_runtime("p1")
+
+        self.assertEqual(runtime.health_state, ConsoleProxyHealthState.COOLING_DOWN)
+
+    async def test_runtime_error_and_snapshot_never_expose_proxy_password(self):
+        """健康错误与管理快照中都不应出现代理明文密码。"""
+        secret = "proxy-secret"
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.entries": [
+                    {
+                        "id": "p1",
+                        "url": "http://proxy1:8080",
+                        "username": "user",
+                        "password": secret,
+                    }
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            await pool.record_health_result(
+                "p1",
+                generation=0,
+                outcome=ConsoleProxyProbeOutcome.UNHEALTHY,
+                message=f"connect http://user:{secret}@proxy1:8080 failed",
+                latency_ms=10,
+            )
+            snapshot = await pool.snapshot()
+
+        self.assertNotIn(secret, repr(snapshot))
+        self.assertIn("***", snapshot["items"][0]["last_error"])
+
+    async def test_duplicate_endpoint_updates_existing_entry(self):
+        """相同端点和用户名再次导入时应更新而不是追加。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.entries": [
+                    {
+                        "id": "p1",
+                        "url": "http://proxy1:8080",
+                        "username": "user",
+                        "password": "old",
+                    }
+                ]
+            }
+        )
+        pool = await self._pool(cfg)
+        incoming = ConsoleProxyEntry(
+            url="http://proxy1:8080",
+            username="user",
+            password="new",
+        )
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg), patch.object(
+            pool,
+            "replace_entries",
+            new=AsyncMock(),
+        ) as replace_entries:
+            result = await pool.add_entries([incoming])
+        self.assertEqual(result.added, 0)
+        self.assertEqual(result.updated, 1)
+        self.assertEqual(result.entries[0].id, "p1")
+        self.assertEqual(result.entries[0].generation, 1)
+        replace_entries.assert_awaited_once()
+
+    async def test_batch_enable_updates_changed_entries_in_one_write(self):
+        """批量启用应只更新禁用节点，并且只持久化一次。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.entries": [
+                    {
+                        "id": "p1",
+                        "url": "http://proxy1:8080",
+                        "password": "secret",
+                        "enabled": False,
+                    },
+                    {
+                        "id": "p2",
+                        "url": "http://proxy2:8080",
+                        "enabled": True,
+                    },
+                ]
+            }
+        )
+        pool = await self._pool(cfg)
+        with patch(
+            "app.control.proxy.console_pool.get_config",
+            return_value=cfg,
+        ), patch.object(
+            pool,
+            "replace_entries",
+            new=AsyncMock(),
+        ) as replace_entries:
+            result = await pool.set_entries_enabled(
+                ["p1", "p2", "p1"],
+                True,
+            )
+
+        self.assertEqual(result.changed, 1)
+        self.assertEqual(result.unchanged, 1)
+        self.assertEqual(result.entries[0].id, "p1")
+        self.assertEqual(result.entries[0].generation, 1)
+        self.assertEqual(result.entries[0].password, "secret")
+        replace_entries.assert_awaited_once()
+
+    async def test_batch_delete_validates_all_ids_before_write(self):
+        """批量删除混入未知 ID 时不得产生部分配置变更。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"},
+                    {"id": "p2", "url": "http://proxy2:8080"},
+                ]
+            }
+        )
+        pool = await self._pool(cfg)
+        with patch(
+            "app.control.proxy.console_pool.get_config",
+            return_value=cfg,
+        ), patch.object(
+            pool,
+            "replace_entries",
+            new=AsyncMock(),
+        ) as replace_entries:
+            with self.assertRaises(KeyError):
+                await pool.remove_entries(["p1", "missing"])
+            deleted = await pool.remove_entries(["p1", "p1"])
+
+        self.assertEqual(deleted, 1)
+        remaining = replace_entries.await_args.args[0]
+        self.assertEqual([entry.id for entry in remaining], ["p2"])
+        self.assertEqual(replace_entries.await_count, 1)
+
+    async def test_batch_reset_preserves_unselected_runtime_and_clears_binding(self):
+        """批量重置应沿用单节点语义且不影响未选节点。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"},
+                    {"id": "p2", "url": "http://proxy2:8080"},
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+        await self._mark_all_healthy(pool, cfg)
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            lease = await pool.acquire(
+                token="token-a",
+                fallback_lease_factory=_fallback_lease_factory,
+            )
+            reset = await pool.reset_entries([lease.proxy_id])
+            reset_runtime = await pool.state_repository.get_runtime(lease.proxy_id)
+            other_id = "p2" if lease.proxy_id == "p1" else "p1"
+            other_runtime = await pool.state_repository.get_runtime(other_id)
+            counts = await pool.state_repository.binding_counts()
+
+        self.assertEqual([entry.id for entry in reset], [lease.proxy_id])
+        self.assertEqual(reset_runtime.health_state, ConsoleProxyHealthState.UNKNOWN)
+        self.assertEqual(other_runtime.health_state, ConsoleProxyHealthState.HEALTHY)
+        self.assertEqual(counts, {})
+
+    async def test_batch_clear_bindings_only_affects_selected_nodes(self):
+        """批量解绑应保留未选代理上的账号绑定。"""
+        cfg = _PoolConfig(
+            {
+                "console.proxy_pool.enabled": True,
+                "console.proxy_pool.entries": [
+                    {"id": "p1", "url": "http://proxy1:8080"},
+                    {"id": "p2", "url": "http://proxy2:8080"},
+                ],
+            }
+        )
+        pool = await self._pool(cfg)
+        await self._mark_all_healthy(pool, cfg)
+        with patch("app.control.proxy.console_pool.get_config", return_value=cfg):
+            first = await pool.acquire(
+                token="token-a",
+                fallback_lease_factory=_fallback_lease_factory,
+            )
+            second = await pool.acquire(
+                token="token-b",
+                fallback_lease_factory=_fallback_lease_factory,
+            )
+            cleared = await pool.clear_entry_bindings([first.proxy_id])
+            counts = await pool.state_repository.binding_counts()
+
+        self.assertNotEqual(first.proxy_id, second.proxy_id)
+        self.assertEqual(cleared, 1)
+        self.assertEqual(counts, {second.proxy_id: 1})
+
+    def test_account_key_is_stable_and_secret_free(self):
+        """账号绑定键应稳定且不包含原 token。"""
+        first = account_key_for_token("sso=secret")
+        second = account_key_for_token("secret")
+        self.assertEqual(first, second)
+        self.assertNotIn("secret", first)
 
 
 if __name__ == "__main__":

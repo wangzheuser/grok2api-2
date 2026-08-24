@@ -523,17 +523,19 @@ const SCHEMA_DEF = [
         section: 'console.proxy_pool',
         fields: [
           { key: 'enabled', label: '启用 Console 代理池', type: 'bool', desc: '仅影响 console.x.ai 请求；关闭时继续使用全局网络代理配置。' },
-          { key: 'fallback_to_global_proxy', label: '无可用代理时回退全局代理', type: 'bool', desc: '启用后，Console 代理池无可调度代理时回退 proxy.egress。' },
+          { key: 'fallback_to_global_proxy', label: '无可用代理时回退全局代理', type: 'bool', desc: '启用后，Console 代理池无可调度代理时回退 proxy.egress；全局出口必须配置固定代理或非空代理池。' },
           { key: 'max_proxy_retries_per_request', label: '单请求代理重试次数', type: 'number', min: 0, desc: '代理硬失败时，同一账号最多重绑代理重试次数。' },
           { key: 'challenge_failure_threshold', label: 'Challenge 失败阈值', type: 'number', min: 1, desc: '403 / challenge 软失败达到该次数后才切换代理。' },
           { key: 'static_cooldown_sec', label: '静态代理冷却（秒）', type: 'number', min: 1, desc: '静态代理连接层失败后的冷却时长。' },
           { key: 'dynamic_retry_base_sec', label: '动态模板初始退避（秒）', type: 'number', min: 1, desc: 'dynamic_template 代理失败后的初始退避。' },
           { key: 'dynamic_retry_max_sec', label: '动态模板最大退避（秒）', type: 'number', min: 1, desc: 'dynamic_template 代理连续失败后的最大退避。' },
           { key: 'dynamic_backoff_factor', label: '动态模板退避因子', type: 'number', min: 1, desc: 'dynamic_template 连续失败退避倍数。' },
-          { key: 'health_check_enabled', label: '启用健康检查开关', type: 'bool', desc: '后台代理池页测试按钮与后续定时检查共用的开关。' },
+          { key: 'health_check_enabled', label: '启用定时健康检查', type: 'bool', desc: '开启后由后台任务定期检测全部已启用代理。' },
           { key: 'health_check_url', label: '健康检查 URL', type: 'text', desc: '代理连通性测试访问的地址。' },
-          { key: 'health_check_interval_sec', label: '健康检查间隔（秒）', type: 'number', min: 1, desc: '预留给后续定时健康检查的间隔。' },
+          { key: 'health_check_interval_sec', label: '健康检查间隔（秒）', type: 'number', min: 5, desc: '定时检测全部已启用代理的间隔，最小 5 秒。' },
           { key: 'health_check_timeout_sec', label: '健康检查超时（秒）', type: 'number', min: 1, desc: '后台手动测试代理的请求超时。' },
+          { key: 'health_check_concurrency', label: '健康检查并发数', type: 'number', min: 1, max: 100, desc: '单个 Worker 执行共享健康任务时的最大并发数。' },
+          { key: 'binding_idle_ttl_sec', label: '绑定闲置清理（秒）', type: 'number', min: 60, desc: '账号 sticky 绑定超过该闲置时间后自动清理，默认 7 天。' },
           { key: 'proxy_pool_page', label: '代理池管理', type: 'link', href: '/admin/proxies', text: '打开代理池页面', desc: '新增、导入、启停、重置和测试 Console 专用代理。' },
         ]
       },
@@ -605,6 +607,12 @@ const SCHEMA_DEF = [
             descKey: 'config.schema.fields.proxyMode.desc',
           },
           {
+            key: 'effective_outlet_preview',
+            label: '有效出口预览',
+            type: 'outlet_preview',
+            desc: '根据当前页面值显示基础出口、资源下载出口以及 Console 回退是否有效。',
+          },
+          {
             key: 'proxy_url',
             label: '基础代理 URL',
             labelKey: 'config.schema.fields.proxyUrl.label',
@@ -628,16 +636,28 @@ const SCHEMA_DEF = [
             key: 'proxy_pool',
             label: '基础代理池',
             labelKey: 'config.schema.fields.proxyPool.label',
-            type: 'textarea',
+            type: 'line_list',
             desc: 'API 流量代理池，每行一个代理 URL，请求时轮转使用。',
             descKey: 'config.schema.fields.proxyPool.desc',
+            showIf: { path: 'proxy.egress.mode', values: ['proxy_pool'] },
+          },
+          {
+            key: 'rotation_strategy',
+            label: '轮换策略',
+            type: 'select',
+            options: [
+              { value: 'sticky_failover', label: '故障切换（保持粘性）' },
+              { value: 'round_robin', label: '逐请求轮询' },
+              { value: 'random', label: '随机选择' },
+            ],
+            desc: '故障切换保持当前出口直到失败；逐请求轮询和随机选择会在每次请求时重新选点。',
             showIf: { path: 'proxy.egress.mode', values: ['proxy_pool'] },
           },
           {
             key: 'resource_proxy_pool',
             label: '资源代理池',
             labelKey: 'config.schema.fields.resourceProxyPool.label',
-            type: 'textarea',
+            type: 'line_list',
             desc: '媒体资源下载专用代理池，每行一个代理 URL；留空时回落至基础代理池。',
             descKey: 'config.schema.fields.resourceProxyPool.desc',
             showIf: { path: 'proxy.egress.mode', values: ['proxy_pool'] },
@@ -789,7 +809,10 @@ const SCHEMA_DEF = [
 let SCHEMA = [];
 let _cfg = {};        // loaded config (nested)
 let _dirty = {};      // { "section.key": newValue }
-let _activeTab = SCHEMA_DEF[0].id;
+const _requestedTab = new URLSearchParams(location.search).get('tab');
+let _activeTab = SCHEMA_DEF.some(tab => tab.id === _requestedTab)
+  ? _requestedTab
+  : SCHEMA_DEF[0].id;
 let _configLoaded = false;
 let _rowRefs = new Map();
 let _tabButtons = new Map();
@@ -912,7 +935,7 @@ async function _api(method, path, body) {
     headers: { ...(body != null && { 'Content-Type': 'application/json' }), Authorization: `Bearer ${key}` },
     ...(body != null && { body: JSON.stringify(body) }),
   });
-  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || r.status); }
+  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d?.error?.message || d.detail || d.message || r.status); }
   return r.json();
 }
 
@@ -970,6 +993,47 @@ function _getValue(section, key, field) {
 function _getCurrentValue(section, key, field) {
   const fp = _fullPath(section, key);
   return fp in _dirty ? _dirty[fp] : _getValue(section, key, field);
+}
+
+function _setDirtyValue(fp, value, original = _getByPath(_cfg, fp)) {
+  const wasDirty = fp in _dirty;
+  const same = String(original) === String(value) || original === value;
+  if (same) delete _dirty[fp]; else _dirty[fp] = value;
+  const isDirty = fp in _dirty;
+  if (wasDirty !== isDirty) _updateDirtyCount(fp, isDirty ? 1 : -1);
+}
+
+function _hasConfiguredGlobalProxy() {
+  const mode = _current('proxy.egress.mode', 'direct');
+  if (mode === 'single_proxy') {
+    return Boolean(String(_current('proxy.egress.proxy_url', '') || '').trim());
+  }
+  if (mode === 'proxy_pool') {
+    const pool = _current('proxy.egress.proxy_pool', []);
+    return Array.isArray(pool) && pool.some(item => String(item || '').trim());
+  }
+  return false;
+}
+
+function _reconcileConsoleProxyFallback(changedPath) {
+  const enabledPath = 'console.proxy_pool.enabled';
+  const fallbackPath = 'console.proxy_pool.fallback_to_global_proxy';
+  const enabled = Boolean(_current('console.proxy_pool.enabled', false));
+  const fallback = Boolean(_current(fallbackPath, false));
+  const explicitEnable = changedPath === fallbackPath && fallback;
+  const enablesConsole = changedPath === enabledPath && enabled && fallback;
+  const changesGlobalEgress = changedPath.startsWith('proxy.egress.') && enabled && fallback;
+  if (
+    _hasConfiguredGlobalProxy()
+    || (!explicitEnable && !enablesConsole && !changesGlobalEgress)
+  ) {
+    return false;
+  }
+  _setDirtyValue(fallbackPath, false, _getByPath(_cfg, fallbackPath) ?? false);
+  const input = document.getElementById('field-console.proxy_pool-fallback_to_global_proxy');
+  if (input) input.checked = false;
+  _refreshRow('console.proxy_pool', 'fallback_to_global_proxy');
+  return true;
 }
 
 // ── Render ──────────────────────────────────────────────────────────────────
@@ -1060,6 +1124,10 @@ document.addEventListener('click', (event) => {
 function renderInput(field, section, value) {
   const fp = _fullPath(section, field.key);
 
+  if (field.type === 'outlet_preview') {
+    return _el('div', { id: 'effective-outlet-preview', class: 'cfg-desc', style: 'font-weight:700;line-height:1.6' }, _effectiveOutletPreview());
+  }
+
   if (field.type === 'link') {
     return _el('a', {
       class: 'page-action-btn',
@@ -1071,14 +1139,18 @@ function renderInput(field, section, value) {
   }
 
   const onChange = (v) => {
-    const wasDirty = fp in _dirty;
     const orig = _getValue(section, field.key, field);
-    const same = String(orig) === String(v) || orig === v;
-    if (same) delete _dirty[fp]; else _dirty[fp] = v;
-    const isDirty = fp in _dirty;
-    if (wasDirty !== isDirty) _updateDirtyCount(fp, isDirty ? 1 : -1);
+    _setDirtyValue(fp, v, orig);
+    const fallbackAutoDisabled = _reconcileConsoleProxyFallback(fp);
     _refreshRow(section, field.key);
-    _refreshDirtyState({ changedPaths: [fp] });
+    const changedPaths = fallbackAutoDisabled
+      ? [fp, 'console.proxy_pool.fallback_to_global_proxy']
+      : [fp];
+    _refreshDirtyState({ changedPaths });
+    _refreshOutletPreview();
+    if (fallbackAutoDisabled) {
+      showToast('未配置有效的全局代理，已自动关闭 Console 全局回退', 'info');
+    }
   };
 
   if (field.type === 'bool') {
@@ -1118,11 +1190,20 @@ function renderInput(field, section, value) {
     return sel;
   }
 
-  if (field.type === 'textarea') {
+  if (field.type === 'textarea' || field.type === 'line_list') {
     const ta = _el('textarea', { class: 'cfg-textarea', id: `field-${section}-${field.key}`,
-      rows: '3', placeholder: '' });
-    ta.value = value ?? '';
-    ta.addEventListener('input', () => onChange(ta.value));
+      rows: field.type === 'line_list' ? '5' : '3', placeholder: '' });
+    ta.value = field.type === 'line_list' && Array.isArray(value)
+      ? value.join('\n')
+      : (value ?? '');
+    ta.addEventListener('input', () => {
+      if (field.type === 'line_list') {
+        const items = ta.value.split(/[\r\n,]+/).map(item => item.trim()).filter(Boolean);
+        onChange([...new Set(items)]);
+        return;
+      }
+      onChange(ta.value);
+    });
     return ta;
   }
 
@@ -1280,6 +1361,9 @@ function renderAll() {
 
 function switchTab(id) {
   _activeTab = id;
+  const url = new URL(location.href);
+  url.searchParams.set('tab', id);
+  history.replaceState(null, '', url);
   document.querySelectorAll('.cfg-tab').forEach(b =>
     b.classList.toggle('active', b.dataset.tab === id));
   document.querySelectorAll('.cfg-panel').forEach(p =>
@@ -1346,6 +1430,42 @@ function _refreshDirtyState({ autoNormalizeSelects = true, changedPaths = null }
   if (!changedPaths) _tabButtons.forEach((_, tabId) => _syncTabDirtyState(tabId));
 }
 
+function _current(path, fallback = '') {
+  return path in _dirty ? _dirty[path] : (_getByPath(_cfg, path) ?? fallback);
+}
+
+function _effectiveOutletPreview() {
+  const mode = _current('proxy.egress.mode', 'direct');
+  const baseUrl = String(_current('proxy.egress.proxy_url', '') || '').trim();
+  const basePool = _current('proxy.egress.proxy_pool', []);
+  const resourceUrl = String(_current('proxy.egress.resource_proxy_url', '') || '').trim();
+  const resourcePool = _current('proxy.egress.resource_proxy_pool', []);
+  let base = '直连';
+  let valid = true;
+  if (mode === 'single_proxy') {
+    valid = !!baseUrl;
+    base = valid ? '固定代理（已配置）' : '固定代理（缺少 URL）';
+  } else if (mode === 'proxy_pool') {
+    const count = Array.isArray(basePool) ? basePool.filter(Boolean).length : 0;
+    valid = count > 0;
+    base = valid ? `基础代理池（${count} 节点）` : '基础代理池（空）';
+  }
+  let resource = '跟随基础出口';
+  if (mode === 'single_proxy' && resourceUrl) resource = '资源固定代理';
+  if (mode === 'proxy_pool' && Array.isArray(resourcePool) && resourcePool.filter(Boolean).length) resource = `资源代理池（${resourcePool.filter(Boolean).length} 节点）`;
+  const consoleEnabled = Boolean(_current('console.proxy_pool.enabled', false));
+  const fallback = Boolean(_current('console.proxy_pool.fallback_to_global_proxy', false));
+  const fallbackText = consoleEnabled && fallback
+    ? (valid && mode !== 'direct' ? 'Console 回退有效' : 'Console 回退无有效代理，将失败关闭')
+    : 'Console 不使用全局回退';
+  return `基础：${base}；资源：${resource}；${fallbackText}`;
+}
+
+function _refreshOutletPreview() {
+  const el = document.getElementById('effective-outlet-preview');
+  if (el) el.textContent = _effectiveOutletPreview();
+}
+
 // ── Load config ────────────────────────────────────────────────────────────
 async function load() {
   try {
@@ -1371,14 +1491,14 @@ async function doSave() {
 
   try {
     showToast(tr('config.saving', null, '正在保存更改…'), 'info');
-    await _api('POST', '/config', patch);
-    // Merge into local _cfg so re-render shows correct values.
-    Object.entries(_dirty).forEach(([fp, v]) => _setByPath(_cfg, fp, v));
-    _dirty = {};
-    // Re-render to clear modified state
-    renderAll();
-    _refreshDirtyState({ autoNormalizeSelects: false });
-    showToast(tr('config.saveSuccess', null, '更改已保存'), 'success');
+    const result = await _api('POST', '/config', patch);
+    // 重新读取服务端最终配置，确保联动规范化结果与页面一致。
+    await load();
+    if (result.fallback_auto_disabled) {
+      showToast('更改已保存；因未配置有效全局代理，Console 全局回退已关闭', 'info');
+    } else {
+      showToast(tr('config.saveSuccess', null, '更改已保存'), 'success');
+    }
   } catch (e) {
     showToast(tr('config.saveFailed', { message: e.message }, `保存更改失败: ${e.message}`), 'error');
   }
