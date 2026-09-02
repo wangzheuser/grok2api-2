@@ -1047,7 +1047,7 @@
       <div class="dialog-help" id="import-file-hint" data-i18n="account.importHintDefault">支持 .txt（每行一个 Token）或 .json（{pool:[tokens]} 格式）</div>
       <div class="dialog-field">
         <span class="dialog-label" data-i18n="account.labelFile">文件</span>
-        <input class="import-file-input" id="import-file" type="file" accept=".txt,.json,text/plain,application/json" onchange="updateImportFileState()">
+        <input class="import-file-input" id="import-file" type="file" accept=".txt,.json,text/plain,application/json" multiple onchange="updateImportFileState()">
         <label for="import-file" class="import-file-shell">
           <div class="import-file-name empty" id="import-file-name" data-i18n="account.noFile">未选择文件</div>
         </label>
@@ -1737,42 +1737,112 @@ async function doAdd() {
 }
 
 async function doImport() {
-  const file = document.getElementById('import-file').files?.[0];
-  if (!file) return showToast(tr('account.selectFile', null, '请选择文件'), 'error');
-  const isJson = file.name.toLowerCase().endsWith('.json');
+  const files = Array.from(document.getElementById('import-file').files || []);
+  if (!files.length) return showToast(tr('account.selectFile', null, '请选择文件'), 'error');
   const autoNsfw = document.getElementById('import-file-auto-nsfw').checked;
-  let raw = '';
-  try { raw = await file.text(); } catch { return showToast(tr('account.readFileFailed', null, '读取文件失败'), 'error'); }
+  const parsedFiles = await Promise.all(files.map(parseImportFile));
+  const skippedFiles = parsedFiles.filter(result => result.error).map(result => result.name);
+  const validFiles = parsedFiles.filter(result => !result.error);
+  const jsonPools = new Map();
+  const txtTokens = new Set();
 
-  if (isJson) {
-    let parsed;
-    try { parsed = JSON.parse(raw); } catch { return showToast(tr('account.jsonInvalid', null, 'JSON 格式错误'), 'error'); }
-    if (typeof parsed !== 'object' || Array.isArray(parsed)) return showToast(tr('account.jsonShapeInvalid', null, 'JSON 格式不正确，应为 {pool:[tokens]} 结构'), 'error');
-    let total = 0;
-    Object.values(parsed).forEach(arr => { if (Array.isArray(arr)) total += arr.length; });
-    if (!total) return showToast(tr('account.jsonEmpty', null, 'JSON 文件中没有可导入的 Token'), 'error');
-    try {
-      showToast(tr('account.importing', { n: total }, `正在导入 ${total} 个账户…`), 'info');
-      await _api('POST', `/tokens?auto_nsfw=${autoNsfw}`, parsed);
-      closeModal('modal-import-file');
-      showToast(tr('account.importJsonDone', { n: total }, `导入完成，共 ${total} 个`), 'success');
-      load();
-    } catch (e) { showToast(`${tr('account.importFailed', null, '导入失败')}: ${e.message}`, 'error'); }
-  } else {
-    // TXT 格式: 每行一个 token
-    const pool = document.getElementById('import-file-pool').value;
-    const newToks = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    if (!newToks.length) return showToast(tr('account.fileEmpty', null, '文件中没有可导入的 Token'), 'error');
-    return saveTokens(
-      pool,
-      newToks,
-      autoNsfw,
-      'modal-import-file',
-      tr('account.importing', { n: newToks.length }, `正在导入 ${newToks.length} 个账户…`),
-      tr('account.importDone', null, '导入完成'),
-      tr('account.importFailed', null, '导入失败'),
-    );
+  validFiles.forEach(result => {
+    if (result.kind === 'txt') {
+      result.tokens.forEach(token => txtTokens.add(token));
+      return;
+    }
+    Object.entries(result.pools).forEach(([pool, items]) => {
+      if (!jsonPools.has(pool)) jsonPools.set(pool, new Map());
+      const poolItems = jsonPools.get(pool);
+      items.forEach(item => {
+        const token = importItemToken(item);
+        if (!poolItems.has(token)) poolItems.set(token, item);
+      });
+    });
+  });
+
+  const txtPool = document.getElementById('import-file-pool').value;
+  const samePoolJson = jsonPools.get(txtPool);
+  if (samePoolJson) samePoolJson.forEach((_, token) => txtTokens.delete(token));
+
+  const jsonPayload = {};
+  let jsonCount = 0;
+  jsonPools.forEach((items, pool) => {
+    jsonPayload[pool] = Array.from(items.values());
+    jsonCount += jsonPayload[pool].length;
+  });
+  const textPayload = Array.from(txtTokens);
+  const total = jsonCount + textPayload.length;
+  if (!total) {
+    const detail = skippedFiles.length ? `: ${skippedFiles.join(', ')}` : '';
+    return showToast(`${tr('account.noValidFiles', null, '所选文件中没有可导入的 Token')}${detail}`, 'error');
   }
+
+  try {
+    showToast(tr('account.importing', { n: total }, `正在导入 ${total} 个账户…`), 'info');
+    let processed = 0;
+    let existing = 0;
+    if (jsonCount) {
+      const result = await _api('POST', `/tokens?auto_nsfw=${autoNsfw}`, jsonPayload);
+      processed += Number(result.count || 0);
+    }
+    if (textPayload.length) {
+      const result = await _api('POST', `/tokens/add?auto_nsfw=${autoNsfw}`, { pool: txtPool, tokens: textPayload });
+      processed += Number(result.count || 0);
+      existing += Number(result.skipped || 0);
+    }
+    closeModal('modal-import-file');
+    const summary = tr(
+      'account.importBatchDone',
+      { count: processed, existing, files: skippedFiles.length },
+      `导入完成，处理 ${processed} 个，已存在 ${existing} 个，跳过 ${skippedFiles.length} 个无效文件`,
+    );
+    const detail = skippedFiles.length
+      ? `；${tr('account.importSkippedFiles', { files: skippedFiles.join(', ') }, `无效文件：${skippedFiles.join(', ')}`)}`
+      : '';
+    showToast(`${summary}${detail}`, 'success');
+    load();
+  } catch (e) {
+    showToast(`${tr('account.importFailed', null, '导入失败')}: ${e.message}`, 'error');
+  }
+}
+
+function importItemToken(item) {
+  if (typeof item === 'string') return item.trim();
+  if (item && typeof item === 'object' && !Array.isArray(item) && typeof item.token === 'string') return item.token.trim();
+  return '';
+}
+
+async function parseImportFile(file) {
+  let raw;
+  try { raw = await file.text(); } catch { return { name: file.name, error: 'read' }; }
+  if (!file.name.toLowerCase().endsWith('.json')) {
+    const tokens = [...new Set(raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean))];
+    return tokens.length ? { name: file.name, kind: 'txt', tokens } : { name: file.name, error: 'empty' };
+  }
+
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return { name: file.name, error: 'json' }; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { name: file.name, error: 'shape' };
+  const entries = Object.entries(parsed);
+  if (!entries.length || entries.some(([pool, items]) => !pool.trim() || !Array.isArray(items))) {
+    return { name: file.name, error: 'shape' };
+  }
+  const pools = {};
+  let total = 0;
+  for (const [pool, items] of entries) {
+    const unique = new Map();
+    for (const item of items) {
+      const token = importItemToken(item);
+      if (!token) return { name: file.name, error: 'shape' };
+      if (!unique.has(token)) unique.set(token, item);
+    }
+    if (unique.size) {
+      pools[pool] = Array.from(unique.values());
+      total += unique.size;
+    }
+  }
+  return total ? { name: file.name, kind: 'json', pools } : { name: file.name, error: 'empty' };
 }
 
 async function doEdit() {
@@ -1791,18 +1861,24 @@ async function doEdit() {
 }
 
 function updateImportFileState() {
-  const file = document.getElementById('import-file').files?.[0];
+  const files = Array.from(document.getElementById('import-file').files || []);
   const el = document.getElementById('import-file-name');
   if (!el) return;
-  el.textContent = file ? file.name : tr('account.noFile', null, '未选择文件');
-  el.classList.toggle('empty', !file);
-  const isJson = file && file.name.toLowerCase().endsWith('.json');
+  el.textContent = files.length > 1
+    ? tr('account.filesSelected', { n: files.length }, `已选择 ${files.length} 个文件`)
+    : (files[0]?.name || tr('account.noFile', null, '未选择文件'));
+  el.title = files.map(file => file.name).join('\n');
+  el.classList.toggle('empty', !files.length);
+  const hasTxt = files.some(file => !file.name.toLowerCase().endsWith('.json'));
+  const hasJson = files.some(file => file.name.toLowerCase().endsWith('.json'));
   const poolRow = document.getElementById('import-file-pool-row');
   const hint    = document.getElementById('import-file-hint');
-  if (poolRow) poolRow.style.display = isJson ? 'none' : '';
-  if (hint) hint.textContent = isJson
-    ? tr('account.importHintJson', null, 'JSON 文件已包含 pool 信息，无需选择类型')
-    : tr('account.importHintTxt', null, '每行一个 Token，将添加到所选类型');
+  if (poolRow) poolRow.style.display = files.length && !hasTxt ? 'none' : '';
+  if (hint) hint.textContent = hasTxt && hasJson
+    ? tr('account.importHintMixed', null, 'TXT 文件使用所选类型，JSON 文件使用文件内的类型信息')
+    : (hasJson
+      ? tr('account.importHintJson', null, 'JSON 文件已包含 pool 信息，无需选择类型')
+      : tr('account.importHintTxt', null, '每行一个 Token，将添加到所选类型'));
 }
 
 async function saveTokens(pool, newToks, autoNsfw, modalId, pendingMessage, successPrefix, errorPrefix) {

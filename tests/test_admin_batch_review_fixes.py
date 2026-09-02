@@ -125,6 +125,10 @@ class RedisRepositoryReviewFixTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AccountHtmlReviewFixTests(unittest.TestCase):
+    @staticmethod
+    def _account_html() -> str:
+        return Path("app/statics/admin/account.html").read_text(encoding="utf-8")
+
     def test_disabled_nsfw_buttons_use_row_specific_unavailable_reason(self):
         with open("app/statics/admin/account.html", encoding="utf-8") as fh:
             html = fh.read()
@@ -148,6 +152,40 @@ class AccountHtmlReviewFixTests(unittest.TestCase):
             with self.subTest(locale=path.name):
                 self.assertIn("account", data, f"Locale {path.name} missing account section")
                 self.assertIn("rowActionNotSupported", data["account"])
+
+    def test_import_file_input_supports_multiple_mixed_files(self):
+        html = self._account_html()
+
+        self.assertRegex(html, r'id="import-file"[^>]*\bmultiple\b')
+        self.assertIn("Array.from(document.getElementById('import-file').files || [])", html)
+        self.assertIn("Promise.all(files.map(parseImportFile))", html)
+        self.assertIn("hasTxt && hasJson", html)
+
+    def test_import_files_are_merged_deduplicated_and_invalid_files_are_skipped(self):
+        html = self._account_html()
+
+        self.assertIn("const skippedFiles = parsedFiles.filter(result => result.error)", html)
+        self.assertIn("const jsonPools = new Map()", html)
+        self.assertIn("const txtTokens = new Set()", html)
+        self.assertIn("if (!poolItems.has(token)) poolItems.set(token, item)", html)
+        self.assertIn("samePoolJson.forEach((_, token) => txtTokens.delete(token))", html)
+        self.assertIn("if (!total)", html)
+        self.assertIn("`/tokens?auto_nsfw=${autoNsfw}`", html)
+        self.assertIn("`/tokens/add?auto_nsfw=${autoNsfw}`", html)
+
+    def test_multi_file_import_messages_are_translated_for_all_account_locales(self):
+        required_keys = {
+            "filesSelected",
+            "importHintMixed",
+            "importBatchDone",
+            "importSkippedFiles",
+            "noValidFiles",
+        }
+
+        for path in Path("app/statics/i18n").glob("*.json"):
+            data = orjson.loads(path.read_bytes())
+            with self.subTest(locale=path.name):
+                self.assertTrue(required_keys.issubset(data["account"]))
 
 
 class ConfigHtmlReviewFixTests(unittest.TestCase):
