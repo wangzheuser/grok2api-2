@@ -85,7 +85,13 @@ class ModelCatalogTests(unittest.TestCase):
                 )
                 self.assertEqual(payload["model"], upstream_id)
                 self.assertEqual(payload["reasoning"], {"effort": effort})
-                self.assertIn({"type": "web_search", "enable_image_understanding": True}, payload["tools"])
+                if upstream_id == "grok-4.5":
+                    self.assertIn(
+                        {"type": "web_search", "enable_image_understanding": True},
+                        payload["tools"],
+                    )
+                else:
+                    self.assertNotIn("tools", payload)
 
     def test_unlisted_model_uses_transient_console_spec(self) -> None:
         """Resolve an unlisted ID without adding it to the public catalog."""
