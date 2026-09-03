@@ -62,6 +62,15 @@ MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("grok-4.3-low",                           ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.3 Low Thinking"),
     ModelSpec("grok-4.3-medium",                        ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.3 Medium Thinking"),
     ModelSpec("grok-4.3-high",                          ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.3 High Thinking"),
+    ModelSpec("grok-4.5",                               ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.5"),
+    ModelSpec("grok-4.5-low",                           ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.5 Low Thinking"),
+    ModelSpec("grok-4.5-medium",                        ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.5 Medium Thinking"),
+    ModelSpec("grok-4.5-high",                          ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.5 High Thinking"),
+    ModelSpec("grok-4.6",                               ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.6"),
+    ModelSpec("grok-4.6-low",                           ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.6 Low Thinking"),
+    ModelSpec("grok-4.6-medium",                        ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.6 Medium Thinking"),
+    ModelSpec("grok-4.6-high",                          ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.6 High Thinking"),
+    ModelSpec("grok-4.6-xhigh",                         ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.6 XHigh Thinking"),
     ModelSpec("grok-4.20-0309-reasoning-console",       ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 0309 Reasoning (Console)"),
     ModelSpec("grok-4.20-0309-console",                 ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 0309 (Console)"),
     ModelSpec("grok-4.20-multi-agent-console",          ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 Multi-Agent (Console)"),
@@ -103,6 +112,23 @@ def resolve(model_name: str) -> ModelSpec:
     return spec
 
 
+def resolve_llm(model_name: str) -> ModelSpec:
+    """Return a registered model or a transient Console passthrough spec."""
+    if not model_name or model_name != model_name.strip():
+        raise ValueError(f"Invalid model: {model_name!r}")
+    spec = _BY_NAME.get(model_name)
+    if spec is not None:
+        return spec
+    return ModelSpec(
+        model_name,
+        ModeId.CONSOLE,
+        Tier.BASIC,
+        Capability.CONSOLE_CHAT,
+        True,
+        model_name,
+    )
+
+
 def list_enabled() -> list[ModelSpec]:
     """Return all enabled models in registration order."""
     return [m for m in MODELS if m.enabled]
@@ -113,4 +139,11 @@ def list_by_capability(cap: Capability) -> list[ModelSpec]:
     return [m for m in MODELS if m.enabled and bool(m.capability & cap)]
 
 
-__all__ = ["MODELS", "get", "resolve", "list_enabled", "list_by_capability"]
+__all__ = [
+    "MODELS",
+    "get",
+    "resolve",
+    "resolve_llm",
+    "list_enabled",
+    "list_by_capability",
+]

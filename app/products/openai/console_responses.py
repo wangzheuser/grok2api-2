@@ -19,7 +19,7 @@ from app.platform.tokens import estimate_prompt_tokens, estimate_tokens, estimat
 from app.control.account.enums import FeedbackKind
 from app.control.account.invalid_credentials import feedback_kind_for_error
 from app.control.account.runtime import get_refresh_service
-from app.control.model.registry import resolve as resolve_model
+from app.control.model.registry import resolve_llm as resolve_model
 from app.dataplane.account.selector import current_strategy
 from app.dataplane.reverse.protocol.xai_console_chat import (
     build_console_payload,

@@ -148,7 +148,10 @@ _LITE_IMAGE_MODELS = {"grok-imagine-image-lite"}
 def _validate_chat(req: ChatCompletionRequest) -> None:
     from app.platform.errors import ValidationError
 
-    spec = model_registry.get(req.model)
+    try:
+        spec = model_registry.resolve_llm(req.model)
+    except ValueError:
+        spec = None
     if spec is None or not spec.enabled:
         raise ValidationError(
             f"Model {req.model!r} does not exist or you do not have access to it.",
@@ -222,13 +225,7 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
         req.stream if req.stream is not None else cfg.get_bool("features.stream", True)
     )
 
-    spec = model_registry.get(req.model)
-    if spec is None:
-        raise ValidationError(
-            f"Model {req.model!r} does not exist or you do not have access to it.",
-            param="model",
-            code="model_not_found",
-        )
+    spec = model_registry.resolve_llm(req.model)
     messages = [m.model_dump(exclude_none=True) for m in req.messages]
 
     try:
@@ -378,7 +375,10 @@ async def responses_endpoint(req: ResponsesCreateRequest):
     from app.platform.config.snapshot import get_config
     from app.platform.errors import ValidationError as _ValidationError
 
-    spec = model_registry.get(req.model)
+    try:
+        spec = model_registry.resolve_llm(req.model)
+    except ValueError:
+        spec = None
     if spec is None or not spec.enabled:
         raise _ValidationError(
             f"Model {req.model!r} does not exist or you do not have access to it.",

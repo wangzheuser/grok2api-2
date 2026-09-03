@@ -80,7 +80,10 @@ async def messages_endpoint(req: MessagesRequest):
     from app.platform.config.snapshot import get_config
 
     # Model validation
-    spec = model_registry.get(req.model)
+    try:
+        spec = model_registry.resolve_llm(req.model)
+    except ValueError:
+        spec = None
     if spec is None or not spec.enabled:
         raise ValidationError(
             f"Model {req.model!r} does not exist or you do not have access to it.",

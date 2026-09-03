@@ -21,7 +21,7 @@ from app.platform.errors import RateLimitError, UpstreamError
 from app.platform.runtime.clock import now_s
 from app.platform.tokens import estimate_prompt_tokens, estimate_tokens, estimate_tool_call_tokens
 from app.control.model.enums import ModeId
-from app.control.model.registry import resolve as resolve_model
+from app.control.model.registry import resolve_llm as resolve_model
 from app.control.account.enums import FeedbackKind
 from app.control.proxy.models import ProxyLease
 from app.dataplane.proxy import get_proxy_runtime

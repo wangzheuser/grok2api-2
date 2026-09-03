@@ -21,7 +21,7 @@ from app.platform.tokens import (
 )
 from app.control.account.runtime import get_refresh_service
 from app.control.account.invalid_credentials import feedback_kind_for_error
-from app.control.model.registry import resolve as resolve_model
+from app.control.model.registry import resolve_llm as resolve_model
 from app.control.model.enums import ModeId
 from app.control.proxy.models import ProxyLease
 from app.control.account.enums import FeedbackKind

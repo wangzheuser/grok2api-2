@@ -57,6 +57,15 @@ CONSOLE_MODELS: dict[str, str] = {
     "grok-4.3-low":                         "grok-4.3",
     "grok-4.3-medium":                      "grok-4.3",
     "grok-4.3-high":                        "grok-4.3",
+    "grok-4.5":                             "grok-4.5",
+    "grok-4.5-low":                         "grok-4.5",
+    "grok-4.5-medium":                      "grok-4.5",
+    "grok-4.5-high":                        "grok-4.5",
+    "grok-4.6":                             "grok-4.6",
+    "grok-4.6-low":                         "grok-4.6",
+    "grok-4.6-medium":                      "grok-4.6",
+    "grok-4.6-high":                        "grok-4.6",
+    "grok-4.6-xhigh":                       "grok-4.6",
     "grok-4.20-0309-reasoning-console":     "grok-4.20-0309-reasoning",
     "grok-4.20-0309-console":               "grok-4.20-0309",
     "grok-4.20-0309-non-reasoning-console": "grok-4.20-0309-non-reasoning",
@@ -68,9 +77,11 @@ CONSOLE_MODELS: dict[str, str] = {
     "grok-build-console":                   "grok-build-0.1",
 }
 
-# 需要附带 reasoning 字段的模型（grok-4.3 系列需要，grok-4.20 系列不需要）
+# 需要附带 reasoning 字段的模型（grok-4.3+ 与 multi-agent）
 _MODELS_WITH_REASONING_FIELD: frozenset[str] = frozenset({
     "grok-4.3",
+    "grok-4.5",
+    "grok-4.6",
     "grok-4.20-multi-agent-0309",
 })
 
@@ -79,6 +90,13 @@ _MODEL_FIXED_EFFORT: dict[str, str] = {
     "grok-4.3-low":    "low",
     "grok-4.3-medium": "medium",
     "grok-4.3-high":   "high",
+    "grok-4.5-low":    "low",
+    "grok-4.5-medium": "medium",
+    "grok-4.5-high":   "high",
+    "grok-4.6-low":    "low",
+    "grok-4.6-medium": "medium",
+    "grok-4.6-high":   "high",
+    "grok-4.6-xhigh":  "xhigh",
     "grok-4.20-multi-agent-low":    "low",
     "grok-4.20-multi-agent-medium": "medium",
     "grok-4.20-multi-agent-high":   "high",
@@ -96,6 +114,8 @@ _MODEL_MAX_OUTPUT_TOKENS: dict[str, int] = {
 
 # 支持 web_search / x_search 工具的模型
 _MODELS_WITH_SEARCH_TOOLS: frozenset[str] = frozenset({
+    "grok-4.5",
+    "grok-4.6",
     "grok-4.20-multi-agent-0309",
     "grok-4.20-0309",
     "grok-4.20-0309-reasoning",
@@ -216,7 +236,7 @@ def build_console_payload(
         "stream": stream,
     }
 
-    # 只有 grok-4.3 需要附带 reasoning 字段，grok-4.20 系列不需要
+    # 新版 reasoning 模型需要显式 effort，旧版 4.20 普通模型保持原协议。
     if console_model in _MODELS_WITH_REASONING_FIELD:
         payload["reasoning"] = {"effort": effort}
 
