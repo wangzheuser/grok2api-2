@@ -163,7 +163,7 @@ def _configured_retry_codes(cfg) -> frozenset[int]:
     """Read retry codes from current config, including legacy array keys."""
     raw = cfg.get("retry.on_codes")
     if raw is None:
-        raw = cfg.get("retry.retry_status_codes", "429,401,503")
+        raw = cfg.get("retry.retry_status_codes", "429,401,403,503")
     return _parse_retry_codes(raw)
 
 

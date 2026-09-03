@@ -24,6 +24,7 @@ from app.products.openai.router import (
     responses_endpoint,
     videos_create,
 )
+from app.products.openai.chat import _configured_retry_codes
 from app.products.openai.schemas import (
     ChatCompletionRequest,
     ImageGenerationRequest,
@@ -85,13 +86,7 @@ class ModelCatalogTests(unittest.TestCase):
                 )
                 self.assertEqual(payload["model"], upstream_id)
                 self.assertEqual(payload["reasoning"], {"effort": effort})
-                if upstream_id == "grok-4.5":
-                    self.assertIn(
-                        {"type": "web_search", "enable_image_understanding": True},
-                        payload["tools"],
-                    )
-                else:
-                    self.assertNotIn("tools", payload)
+                self.assertNotIn("tools", payload)
 
     def test_unlisted_model_uses_transient_console_spec(self) -> None:
         """Resolve an unlisted ID without adding it to the public catalog."""
@@ -181,6 +176,10 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertTrue(payload["fallback_target"])
         self.assertEqual(payload["console_model"], "grok-4.6")
         self.assertEqual(payload["fixed_effort"], "xhigh")
+
+    def test_default_retry_codes_switch_accounts_on_console_403(self) -> None:
+        """Retry another account when one Console identity is rejected."""
+        self.assertIn(403, _configured_retry_codes({}))
 
 
 class LlmPassthroughEndpointTests(unittest.TestCase):

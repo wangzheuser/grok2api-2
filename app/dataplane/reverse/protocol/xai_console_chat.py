@@ -114,7 +114,6 @@ _MODEL_MAX_OUTPUT_TOKENS: dict[str, int] = {
 
 # 支持 web_search / x_search 工具的模型
 _MODELS_WITH_SEARCH_TOOLS: frozenset[str] = frozenset({
-    "grok-4.5",
     "grok-4.20-multi-agent-0309",
     "grok-4.20-0309",
     "grok-4.20-0309-reasoning",
